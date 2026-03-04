@@ -6,10 +6,10 @@
 --            forward (rasterizer_impl.cu)
 --             /                  \
 --            v                    v
---    preprocess (forward.cu) 
---          |
---          v
---    preprocessCUDA (forward.cu)     
+--    preprocess (forward.cu)      render (forward.cu)
+--          |                          |
+--          v                          v
+--    preprocessCUDA (forward.cu)    renderCUDA (forward.cu)  
 
 import "util"
 
@@ -88,30 +88,76 @@ def compute_cov_2D
 
 -- preprocess each gaussian by determining which tiles it touches, the size of its largest radius
 -- its conic, 
-def preprocess [n] 
+def preprocess 
    -- (P: i32) -- n
-    (D: i32) -- degree (for SH)
+    --(D: i32) -- degree (for SH)
     --(M: i32) -- for SH (kinda mysterious)
     (mean: [3]f32)
     (scales: [3]f32)
-    (scale_modifier: f32)
+    --(scale_modifier: f32)
     (rotations: [4]f32)
-    (opacities: [1]f32)
+    --(opacities: [1]f32)
     --(shs: [][3][]f32)
     --(clamped: [3*n]: i8) -- for SH (big buffer)
     --(cov3D_precomp: [][3][3]f32) -- if python were giving us the 3d covariance matrices
-    (colors_precomp: [3]f32)
+    --(colors_precomp: [3]f32)
     (viewmatrix: [4][4]f32)
     (projmatrix: [4][4]f32)
-    (cam_pos: [3]f32)
+    --(cam_pos: [3]f32)
     (W: i32) (H: i32)
-    (focal_x: f32) (focaly: f32)
-    (tan_fovx: f32) (tan_fovy: f32): (f32, f32, [3]f32, f32, [n]f32)  =  -- depths,  max radii, conic, opacity, tiles touched
-        -- we calculate the 
+    (focal_x: f32) (focal_y: f32)
+    (tan_fovx: f32) (tan_fovy: f32)
+    (idx: i32) (tilesize: i32): ([3]f32, [2]f32, []u64)  =  -- conic, mean2d, keys
+        -- the homogeneous coordinates of the gaussian's mean
         let p_hom = transform_point_4x4 mean projmatrix
-        let p_w = 1 / (p_hom[3] + 1e-8)
+        let p_w = 1 / (p_hom[3] + 1e-7) -- avoid divide by 0
+
+        -- the gassian mean in clip space
         let p_proj = [p_hom[0]*p_w, p_hom[1]*p_w, p_hom[2]*p_w]
-        in ???
+        let cov3D = compute_cov_3D scales rotations
+        let cov = compute_cov_2D mean focal_x focal_y tan_fovx tan_fovy cov3D viewmatrix
+        let det = (cov[0] * cov[2] - cov[1] * cov[1])
+
+        -- if the matrix is singular, give it a 0 covariance matrix so it doesn't ruin everything
+        let det_inv = if det == 0 then 0 else 1/det 
+
+        -- take the invserse of the 
+        -- https://en.wikipedia.org/wiki/Invertible_matrix#Methods_of_matrix_inversion
+        let conic = [cov[2]*det_inv, -cov[1]*det_inv, cov[0]*det_inv] 
+
+
+        -- find the range occupied by the gaussian in screen space. We use 
+        -- eigenvalues of the 2d covariance matrix. We want to compute a bounding 
+        -- rectangle of the gaussian and find which screen-space tiles our gaussian
+        -- overlaps
+        let mid = 0.5 * (cov[0] + cov[2])
+        let inner = mid * mid - det
+        
+        -- remember: the eigenvalues of gaussians represent the variances along their principle
+        -- axis. Basically how streched they are along their axes (their eigenvectors).
+        -- There's a trick for calculating eigenvalues: https://www.johndcook.com/blog/2021/05/07/trick-for-2x2-eigenvalues/
+        let lambda1 = mid + f32.sqrt (f32.max 0.1 inner)
+        let lambda2 = mid - f32.sqrt (f32.max 0.1 inner)
+
+        -- get the radius of 3 standard deviations using the larger principle axis
+        let std3 = f32.ceil <| 3 * f32.sqrt (f32.max lambda1 lambda2)
+        let pix = [ndc_to_pix p_proj[0] W, ndc_to_pix p_proj[1] H]
+        let (ylo,yhi,xlo,xhi) = get_rect_2d [mean[0], mean[1]] std3 W H tilesize
+
+        -- make one key per tile that this gaussian overlaps. Each key should define that tile's instance of this gaussian
+        -- in a total ordering based on tile # and depth. The key should also be able to identify this gaussian. We will
+        -- accomplish this by making the key a u64 where the lower 32 bits are this gaussian's index, the next 16 bits are the depth
+        -- and the most significant 16 bits are the tile number. 
+        let base = ((u64.f32 p_proj[0]) << 32) & u64.i32 idx
+        let colspan = xhi-xlo
+        let tiles = (yhi-ylo) * (xhi-xlo)
+        let keys = map (\i ->    -- must we do a map here? Should this be sequential?
+            let row = ylo + i/colspan
+            let col = xlo + (i % colspan)
+            let tileidx = row * (W/tilesize) + col -- get the global index of this tile
+            in base & (u64.i32 tileidx << 48)
+        ) (1...tiles) 
+        in (conic, pix, keys)
 
 -- Our exposed rasterize function. In this function, we take the means, scales, 
 -- rotations, colors, and opacities of the 3D Gaussians, as well as the camera 
@@ -135,10 +181,18 @@ entry rasterize [n]
     (degree: i32)
     (campos: [3]f32)
     (prefiltered: bool)
-    (debug: bool) : [][]f32 =
+    (debug: bool) :  [n]([3]f32, [2]f32, []u64) =
+    --: [][]f32 =
       --  let P = n
         let H = image_height
         let W = image_width
-        let meansum = map (\xs -> xs[0] + xs[1] + xs[2]) means3D
-        let colorsum = map  (\xs -> xs[0] + xs[1] + xs[2]) colors
-        in  [[dot meansum colorsum]]
+        -- let meansum = map (\xs -> xs[0] + xs[1] + xs[2]) means3D
+        -- let colorsum = map  (\xs -> xs[0] + xs[1] + xs[2]) colors
+        -- in  [[dot meansum colorsum]]
+        let focalx = (f32.i32 W) / (2*tan_fovx)
+        let focaly = (f32.i32 H) / (2*tan_fovy)
+        
+        in map4 
+            (\mean scale rotation i -> 
+                (preprocess mean scale rotation view_matrix proj_matrix W H focalx focaly tan_fovx tan_fovy (i32.i64 i) 16) :> ([3]f32, [2]f32, []u64))
+            means3D scales rotations (iota n)

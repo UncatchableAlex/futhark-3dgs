@@ -67,4 +67,36 @@ entry scale_to_mat (s: [3]f32) : [3][3]f32 =
         [0,0,s[2]]
     ]
 
-    
+-- convert a coordinate from normalized device coordinates (-1 to 1)
+-- to a pixel value
+entry ndc_to_pix (v: f32) (s: i32) : f32 = 
+    ((v + 1.0) * (f32.i32 s) - 1) * 0.5
+
+
+entry get_rect_2d (center: [2]f32) (radius: f32) (W: i32) (H: i32) (tilesize: i32): (i32,i32,i32,i32) =
+    let xlo = f32.max 0 (f32.floor (center[1] - radius))
+    let xhi = f32.min (f32.i32 (W-1)) (f32.ceil  (center[1] + radius))
+    let ylo = f32.max 0 (f32.floor (center[0] - radius))
+    let yhi = f32.min (f32.i32 (H-1)) (f32.ceil  (center[0] + radius))
+    in (
+        (i32.f32 ylo)/tilesize,
+        (i32.f32 yhi)/tilesize,
+        (i32.f32 xlo)/tilesize,
+        (i32.f32 xhi)/tilesize)
+
+
+-- https://www.futhark-lang.org/examples/radix-sort.html
+def radix_sort_step [n] (xs: [n]u64) (b: i32): [n]u64 =
+  let bits = map (\x -> (i32.u64 (x >> u64.i32 b)) & 1) xs
+  let bits_neg = map (1-) bits
+  let offs = reduce (+) 0 bits_neg
+  let idxs0 = map2 (*) bits_neg (scan (+) 0 bits_neg)
+  let idxs1 = map2 (*) bits (map (+offs) (scan (+) 0 bits))
+  let idxs2 = map2 (+) idxs0 idxs1
+  let idxs  = map (\x->x-1) idxs2
+  let xs' = scatter (copy xs) (map i64.i32 idxs) xs
+  in xs'
+
+def radix_sort [n] (xs: [n]u64): [n]u64 =
+  loop xs for i < 32 do radix_sort_step xs i
+        
