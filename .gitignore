@@ -6,3 +6,6 @@ rasterizer.c
 util
 util.c
 ext.cpp
+lib
+*.actual
+*.expected

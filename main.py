@@ -2,6 +2,8 @@ import numpy as np
 import json
 import subprocess
 import time
+import re
+import matplotlib.pyplot as plt
 
 
 
@@ -15,24 +17,20 @@ for np_name in np_names:
     with open(f'./rasterizer_inps/debug_{np_name}.npy', 'rb') as f:
         np_array = np.load(f)
         inps[np_name] = np_array
-        # print(f"{np_name}: {np_array.shape, np_array.dtype}")
 
 with open(f'./rasterizer_inps/{json_name}', 'r') as f:
     json_data = json.load(f)
     inps.update(json_data)
-    # for key, value in json_data.items():
-    #     print(f'{key}: {type(value)}')
 
-
-
+n = 100000000 # how many gaussians we want to render
 inps_data = [
     inps['bg'],
-    inps['means3D'].tolist(),
-    inps['colors_precomp'].tolist(),
-    inps['opacities'].tolist(),
-    inps['scales'].tolist(),
-    inps['rotations'].tolist(),
-    float(inps['scale_modifier']),
+    inps['means3D'].tolist()[:n],
+    inps['colors_precomp'].tolist()[:n],
+    inps['opacities'].tolist()[:n],
+    inps['scales'].tolist()[:n],
+    inps['rotations'].tolist()[:n],
+ #   float(inps['scale_modifier']),
     #[[[0,0,0],[0,0,0],[0,0,0]]],
     inps['viewmatrix'],
     inps['projmatrix'],
@@ -41,15 +39,15 @@ inps_data = [
     int(inps['image_height']),
     int(inps['image_width']),
     #[[[0,0,0],[0,0,0],[0,0,0]]],
-    int(inps['sh_degree']),
-    inps['campos'],
-    'false',
-    'false',
+#    int(inps['sh_degree']),
+#    inps['campos'],
+#    'false',
+#    'false',
 ]
 
+# assemble the parameters that we will jam into futhark's stdin
 futhark_input = "\n".join(str(item) for item in inps_data)
 
-start = time.time()
 proc = subprocess.run(
     ["./rasterizer", "-e", "rasterize"],
     input=futhark_input.encode("utf-8"),
@@ -57,11 +55,19 @@ proc = subprocess.run(
     stderr=subprocess.PIPE
 )
 
+# futhark prints its debug tracing through stderr
+print("sterr: ", proc.stderr.decode())
+
 # check for errors
 if proc.returncode:
     print("futhark error:", proc.stderr.decode())
     raise RuntimeError("futhark execution failed")
 
+# get rid of the extra f32 type indicators that futhark puts on every number in its output
+output = re.sub(r'f32', '', proc.stdout.decode())
 
-output = proc.stdout.decode()
-print(f'result: {output}')
+# turn the futhark output back into a python list. Save it to an image
+rgb = eval(output)
+plt.imshow(np.array(rgb))
+plt.axis("off")
+plt.savefig("image.png", bbox_inches="tight", pad_inches=0)
