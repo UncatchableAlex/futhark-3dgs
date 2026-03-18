@@ -9,3 +9,5 @@ ext.cpp
 lib
 *.actual
 *.expected
+images
+*.avi

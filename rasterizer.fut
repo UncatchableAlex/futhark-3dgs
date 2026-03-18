@@ -214,7 +214,7 @@ def generateElem [n]
     -- extract data for this gaussian
     let box: (i32, i32, i32, i32) = gs[n_idx].bounding_box
     let depth = gs[n_idx].depth
-    let (ylo,yhi,xlo,xhi) = box
+    let (ylo,_,xlo,xhi) = box
     --let box' = #[trace] [ylo,yhi,xlo,xhi]
 
     -- extract the tile that this gaussian/idx refers to
@@ -311,6 +311,7 @@ entry rasterize [n]
    -- (prefiltered: bool)
    -- (debug: bool) --:  [n]([3]f32, [2]f32, [3]u64) =
                     : [i64.i32 image_height][i64.i32 image_width][3]f32 = 
+                    --:f32 = 
         let H = image_height
         let W = image_width
         let tilesize = 16
@@ -349,4 +350,27 @@ entry rasterize [n]
         let f = pixel_color 16 (i64.i32 W) sorted_gaussian_keys sorted_gaussian_indices background preprocessed
 
         -- tabulate on each pixel using our function
-        in tabulate_2d (i64.i32 H) (i64.i32 W) (\y x -> f x y) :> [i64.i32 image_height][i64.i32 image_width][3]f32
+        let pixels = tabulate_2d (i64.i32 H) (i64.i32 W) (\y x -> f x y) :> [i64.i32 image_height][i64.i32 image_width][3]f32
+        let pixel_sum = map (map (\ls -> ls[0] + ls[1] + ls[2])) pixels
+        let p2 = map (reduce (+) 0) pixel_sum
+        let p3 = reduce (+) 0 p2
+        in pixels
+
+    -- entry rasterize' [n]
+    -- (background: [3]f32)
+    -- (means3D: [n][3]f32)
+    -- (colors: [n][3]f32)
+    -- (opacities: [n][1]f32)
+    -- (scales: [n][3]f32)
+    -- (rotations: [n][4]f32)
+    -- (view_matrix: [4][4]f32)
+    -- (proj_matrix: [4][4]f32)
+    -- (tan_fovx: f32)
+    -- (tan_fovy: f32)
+    -- (image_height: i32)
+    -- (image_width: i32) =
+    -- vjp (\(means3D, colors, opacities, scales, rotations) ->
+    --         rasterize background means3D colors opacities scales rotations
+    --             view_matrix proj_matrix tan_fovx tan_fovy image_height image_width)
+    --     (means3D, colors, opacities, scales, rotations)
+    --     1.0f32
