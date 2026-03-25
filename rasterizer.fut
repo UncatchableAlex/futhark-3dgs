@@ -303,17 +303,17 @@ entry rasterize [n]
     (proj_matrix: [4][4]f32)
     (tan_fovx: f32)
     (tan_fovy: f32)
-    (image_height: i32)
-    (image_width: i32)
+    (image_height: i64)
+    (image_width: i64)
     --(sh: [][3][]f32)
   --  (degree: i32)
   --  (campos: [3]f32)
    -- (prefiltered: bool)
    -- (debug: bool) --:  [n]([3]f32, [2]f32, [3]u64) =
-                    : [i64.i32 image_height][i64.i32 image_width][3]f32 = 
+                    : [image_height][image_width][3]f32 = 
                     --:f32 = 
-        let H = image_height
-        let W = image_width
+        let H = i32.i64 image_height
+        let W = i32.i64 image_width
         let tilesize = 16
         let focalx = (f32.i32 W) / (2*tan_fovx)
         let focaly = (f32.i32 H) / (2*tan_fovy)
@@ -350,27 +350,102 @@ entry rasterize [n]
         let f = pixel_color 16 (i64.i32 W) sorted_gaussian_keys sorted_gaussian_indices background preprocessed
 
         -- tabulate on each pixel using our function
-        let pixels = tabulate_2d (i64.i32 H) (i64.i32 W) (\y x -> f x y) :> [i64.i32 image_height][i64.i32 image_width][3]f32
-        let pixel_sum = map (map (\ls -> ls[0] + ls[1] + ls[2])) pixels
-        let p2 = map (reduce (+) 0) pixel_sum
-        let p3 = reduce (+) 0 p2
+        let pixels = tabulate_2d (i64.i32 H) (i64.i32 W) (\y x -> f x y) :> [image_height][image_width][3]f32
+       -- let pixel_sum = map (map (\ls -> ls[0] + ls[1] + ls[2])) pixels
+       -- let p2 = map (reduce (+) 0) pixel_sum
+      --  let p3 = reduce (+) 0 p2
         in pixels
 
-    -- entry rasterize' [n]
-    -- (background: [3]f32)
-    -- (means3D: [n][3]f32)
-    -- (colors: [n][3]f32)
-    -- (opacities: [n][1]f32)
-    -- (scales: [n][3]f32)
-    -- (rotations: [n][4]f32)
-    -- (view_matrix: [4][4]f32)
-    -- (proj_matrix: [4][4]f32)
-    -- (tan_fovx: f32)
-    -- (tan_fovy: f32)
-    -- (image_height: i32)
-    -- (image_width: i32) =
-    -- vjp (\(means3D, colors, opacities, scales, rotations) ->
-    --         rasterize background means3D colors opacities scales rotations
-    --             view_matrix proj_matrix tan_fovx tan_fovy image_height image_width)
-    --     (means3D, colors, opacities, scales, rotations)
-    --     1.0f32
+-- https://en.wikipedia.org/wiki/Structural_similarity_index_measure#Algorithm
+def ssim3 [n] [m] [o]
+    (A: [n][n]f32)
+    (X: [m][o][3]f32)
+    (Y: [m][o][3]f32) 
+    (c1: f32)
+    (c2: f32): f32 =
+    let sum = reduce (+) 0 <| flatten_3d <| tabulate_3d m o 3 (\x y i ->
+        let x' = x - (n/2)
+        let y' = y - (n/2)
+        let nn = n*n
+        let (_, (muX, muY, muXY, muX2, muY2))= loop (j,(muX, muY, muXY, muX2, muY2)) = (0, (0, 0, 0, 0, 0)) while j < nn do
+            let a = x' + (j/n)
+            let b = y' + (j%n)
+            let k = A[j/n][j%n]
+            let inbounds = a >= 0 && b >= 0 && a < m && b < o
+            in (
+                j+1, 
+                if inbounds 
+                    then 
+                        (k*X[a][b][i] + muX, 
+                        k*Y[a][b][i] + muY, 
+                        k*X[a][b][i]*Y[a][b][i] + muXY, 
+                        k*X[a][b][i]*X[a][b][i] + muX2, 
+                        k*Y[a][b][i]*Y[a][b][i] + muY2)
+                    else (muX, muY, muXY, muX2, muY2))
+        let muXX = muX*muX
+        let muYY = muY*muY
+        let sigX = muX2 - muXX
+        let sigY = muY2 - muYY
+        let sigXY = muXY - (muX*muY)
+        in (2*muX*muY + c1)*(2*sigXY + c2) / ((muXX + muYY + c1)*(sigX + sigY + c2)))
+    in sum / (f32.i64 <| m*o*3)
+
+-- a normalized 2d gaussian distribution: https://en.wikipedia.org/wiki/Gaussian_function
+-- we can multiply 2 1d gaussians together to get the 2d version.
+def gdist2d (n: i64) (sigma: f32) = 
+    let g1d = map (\i -> 
+                let num = (i - (n / 2)) ** 2
+                let denom =  2 * (sigma ** 2)
+                in f32.exp (-f32.i64 num/denom))
+            (iota n)
+    let sum = foldl (+) 0 g1d
+    in tabulate_2d n n (\x y -> g1d[x] * g1d[y] / (sum*sum))
+
+
+
+entry grad [n] 
+    (background: [3]f32)
+    (means3D: [n][3]f32)
+    (colors: [n][3]f32)
+    (opacities: [n][1]f32)
+    (scales: [n][3]f32)
+    (rotations: [n][4]f32)
+    (view_matrix: [4][4]f32)
+    (proj_matrix: [4][4]f32)
+    (tan_fovx: f32)
+    (tan_fovy: f32)
+    (image_height: i64)
+    (image_width: i64)
+    (ssim_kernel_size: i32)
+    (ssim_kernel_sigma: f32)
+    (gt_image: [image_height][image_width][3]f32) 
+    (lambda: f32) -- percentage of our loss that is ssim (the rest is L1)
+        : [n][14]f32 = 
+        let f =  (\(means3D, colors, opacities, scales, rotations) ->
+                let pix = rasterize background means3D colors opacities scales rotations
+                    view_matrix proj_matrix tan_fovx tan_fovy image_height image_width
+                
+                let kernel = gdist2d (i64.i32 ssim_kernel_size) ssim_kernel_sigma
+                let c1 = 0.01**2
+                let c2 = 0.03**2
+                let ssim = ssim3 kernel pix gt_image c1 c2
+                let l1abs = map2 (\a b -> f32.abs <| a - b) (flatten_3d pix) (flatten_3d gt_image)
+                let l1 = (reduce (+) 0 l1abs)  / (f32.i64 <| image_height * image_width * 3)
+                in  ((1-lambda)) * l1 + (lambda * ssim))
+        let a = (means3D, colors, opacities, scales, rotations)
+        let b = f a
+        let (dmeans, dcolors, dopacities, dscales, drotations) = vjp f a b
+        let packed = map (\(dmean, dcolor, dopacity, dscale, drot) -> 
+                [dmean[0], dmean[1], dmean[2], dcolor[0], dcolor[1], dcolor[2], dopacity[0], 
+                 dscale[0], dscale[1], dscale[2], drot[0], drot[1], drot[2], drot[3]]
+            ) <|zip5 dmeans dcolors dopacities dscales drotations
+    
+        in packed
+
+        --  #[trace] rasterize background means3D (#[trace] colors) opacities scales rotations
+        --         view_matrix proj_matrix tan_fovx tan_fovy image_height image_width
+
+
+-- let viewmatrix = [[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0f32]]
+-- let projmatrix = viewmatrix
+-- rasterize' [0,0,0] [[0,0,0]] [[0,0,0]] [[0]] [[0,0,0]] [[0,0,0,0]] viewmatrix projmatrix  0 0 1 1 0 0 [[[0,0,0]]]
