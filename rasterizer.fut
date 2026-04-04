@@ -200,8 +200,6 @@ def preprocess
 -- in a total ordering based on tile # and depth. The key should also be able to identify this gaussian. We will
 -- accomplish this by making the key a u64 where the lower 32 bits are the depth and the upper 32 bits are the tile
 def generateElem [n] 
-    -- (boxes: [n](i32,i32,i32,i32)) 
-    -- (depths: [n]f32) 
     (gs: [n]Gaussian2D)
     (prefix_sum: [n]i32) 
     (W: i32)
@@ -209,20 +207,18 @@ def generateElem [n]
     (idx: i64): (u64, i32) =
     -- search to find which gaussian this index refers to
     let bs = binary_search prefix_sum (i32.i64 idx) u64.i32 --binary_search
-    let n_idx = if prefix_sum[bs] == i32.i64 idx then bs else bs - 1
+    let n_idx = if prefix_sum[bs] == i32.i64 idx then bs else bs - 1 -- this is the gaussian idx refers to
 
     -- extract data for this gaussian
-    let box: (i32, i32, i32, i32) = gs[n_idx].bounding_box
+    let (ylo,_,xlo,xhi): (i32, i32, i32, i32) = gs[n_idx].bounding_box
     let depth = gs[n_idx].depth
-    let (ylo,_,xlo,xhi) = box
-    --let box' = #[trace] [ylo,yhi,xlo,xhi]
 
     -- extract the tile that this gaussian/idx refers to
     -- this gaussian spans many tiles. Which of those tiles is this idx?
     let offset = (i32.i64 idx) - prefix_sum[n_idx] 
-    let tile_y = if offset < 0 then ylo + (offset / (xhi - xlo)) else ylo + (offset / (xhi - xlo))
+    let tile_y = ylo + (offset / (xhi - xlo))
     let tile_x =  xlo + (offset % (xhi - xlo))
-    let tile = tile_y * (W/tilesize) + tile_x
+    let tile = tile_y * ((W + tilesize - 1) / tilesize) + tile_x
     let upper =  ((u64.i32 tile) u64.<< 32)
     let key = upper | (u64.u32 <| f32.to_bits depth)
     in (key,n_idx)
@@ -240,7 +236,7 @@ def pixel_color [n] [m]
         -- our pixel's tile
         let tile_y = pix_y / tilesize
         let tile_x = pix_x / tilesize
-        let tile = tile_y * (W / tilesize) + tile_x
+        let tile = tile_y * ((W + tilesize - 1) / tilesize) + tile_x
 
 
         let start = binary_search sorted_keys ((u64.i64 tile) << 32) id
@@ -335,7 +331,7 @@ entry rasterize [n]
         let prefix_sum[0] = 0 -- fix the first element of the prefix sum since rotate will have messed it up
 
         let sorted_list = blocked_radix_sort_by_key
-            256i16                 -- block size for a100
+            256i16                 -- block size for a100 gpu
             (\(k,_) -> k)          -- extract the key
             64                     -- sort on 64 bit keys
             (\i k -> i32.u64 (k >> (u64.i32 i) & 1)) -- get the ith bit

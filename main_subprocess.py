@@ -39,9 +39,9 @@ inps_data = [
     float(inps['tanfovy']),
     int(inps['image_height']),
     int(inps['image_width']),
-    int(11),
-    1.5,
-    []
+   # int(11),
+   # 1.5,
+   # []
     #[[[0,0,0],[0,0,0],[0,0,0]]],
 #    int(inps['sh_degree']),
 #    inps['campos'],
@@ -55,13 +55,13 @@ for filename in os.listdir(image_dir):
         gt = np.array(plt.imread(f'{image_dir}/{filename}'), dtype=np.float32)
     else:
         continue
-    inps_data[-1] = (gt/255).tolist()
+   # inps_data[-1] = (gt/255).tolist()
 
 # assemble the parameters that we will jam into futhark's stdin
     futhark_input = "\n".join(str(item) for item in inps_data)
     print('inputting')
     proc = subprocess.run(
-        ["./rasterizer", "-e", "grad"],
+        ["./rasterizer", "-e", "rasterize"],
         input=futhark_input.encode("utf-8"),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
@@ -78,10 +78,11 @@ for filename in os.listdir(image_dir):
 
     # get rid of the extra f32 type indicators that futhark puts on every number in its output
     output = re.sub(r'f32', '', proc.stdout.decode())
-    print(output)
+    #print(output)
 
 # turn the futhark output back into a python list. Save it to an image
-# rgb = eval(output)
-# plt.imshow(np.array(rgb))
-# plt.axis("off")
-# plt.savefig("image.png", bbox_inches="tight", pad_inches=0)
+    rgb = eval(output)
+    plt.imshow(np.array(rgb))
+    plt.axis("off")
+    plt.savefig("image.png", bbox_inches="tight", pad_inches=0)
+    break

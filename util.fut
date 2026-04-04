@@ -81,8 +81,8 @@ def ndc_to_pix (v: f32) (s: i32) : f32 =
 
 
 def get_rect_2d (x:f32, y:f32) (radius: f32) (W: i32) (H: i32) (tilesize: i32): (i32,i32,i32,i32) =
-    let tiles_x = W / tilesize
-    let tiles_y = H / tilesize
+    let tiles_x = (W + tilesize - 1) / tilesize
+    let tiles_y = (H + tilesize - 1) / tilesize
     let xlo = i32.min tiles_x (i32.max 0 ((i32.f32 (x - radius))/tilesize))
     let xhi = i32.min tiles_x (i32.max 0 ((i32.f32 (x + radius + f32.i32 tilesize - 1))/tilesize))
     let ylo = i32.min tiles_y (i32.max 0 ((i32.f32 (y - radius))/tilesize))
