@@ -35,6 +35,7 @@ type Gaussian2D = {
     depth:f32,
     tiles_touching:i32,
     bounding_box:(i32,i32,i32,i32),
+    radius:i32,
     valid:bool
 }
 
@@ -136,6 +137,7 @@ def preprocess
             depth=0, 
             tiles_touching=0, 
             bounding_box=(0,0,0,0),
+            radius=0,
             valid=false
             }
             -- if the gaussian isn't in the view frustum, return a badGaussian so it doesn't contribute to the rasterization
@@ -172,10 +174,11 @@ def preprocess
         let inner = mid * mid - det
         let lambda1 = mid + f32.sqrt (f32.max 0.1 inner)
         let lambda2 = mid - f32.sqrt (f32.max 0.1 inner)
-        let larger_principle_axis = f32.sqrt (f32.max lambda1 lambda2)
+        let larger_principle_axis = f32.max lambda1 lambda2
 
         -- get the radius of 3 standard deviations using the larger principle axis
-        let std3 = f32.ceil <| 3 * larger_principle_axis
+        let std3 = f32.ceil <| 3 * (f32.sqrt larger_principle_axis)
+
         -- convert homogeneous coordinates to pixel coordinates
         let pix = (ndc_to_pix p_proj[0] W, ndc_to_pix p_proj[1] H)
         let depth:f32 = p_proj[2] -- keep depth info separate
@@ -192,6 +195,7 @@ def preprocess
                 depth=depth, 
                 tiles_touching=num_tiles, 
                 bounding_box=(ylo,yhi,xlo,xhi),
+                radius=i32.f32 std3,
                 valid=true
                 }
 
@@ -306,7 +310,7 @@ entry rasterize [n]
   --  (campos: [3]f32)
    -- (prefiltered: bool)
    -- (debug: bool) --:  [n]([3]f32, [2]f32, [3]u64) =
-                    : [image_height][image_width][3]f32 = 
+                    : (i32, []i32, [image_height][image_width][3]f32) = 
                     --:f32 = 
         let H = i32.i64 image_height
         let W = i32.i64 image_width
@@ -318,7 +322,7 @@ entry rasterize [n]
 
         -- preprocess each gaussian in parallel. This generates our list of Gaussian2D records.
         -- Cull any gaussians not in frame
-        let preprocessed = filter (\g -> g.depth > 0) <| map5
+        let preprocessed = filter (\g -> g.valid) <| map5
             (\mean scale rotation opacity color -> 
                 preprocess mean scale rotation view_matrix' proj_matrix' W H focalx focaly tan_fovx tan_fovy opacity[0] color tilesize)
             means3D scales rotations opacities colors
@@ -327,7 +331,7 @@ entry rasterize [n]
 
         -- get the prefix sum of the number of tiles each gaussian touches
         let prefix_sum = rotate (-1) <| scan (+) 0 num_tiles
-        let unsorted_size = prefix_sum[0]
+        let tiles_touched = prefix_sum[0]
         let prefix_sum[0] = 0 -- fix the first element of the prefix sum since rotate will have messed it up
 
         let sorted_list = blocked_radix_sort_by_key
@@ -335,7 +339,7 @@ entry rasterize [n]
             (\(k,_) -> k)          -- extract the key
             64                     -- sort on 64 bit keys
             (\i k -> i32.u64 (k >> (u64.i32 i) & 1)) -- get the ith bit
-            (map (generateElem preprocessed prefix_sum W tilesize) (iota <| i64.i32 unsorted_size)) -- the kv pairs we are sorting where the key is (tile, depth) as a u64
+            (map (generateElem preprocessed prefix_sum W tilesize) (iota <| i64.i32 tiles_touched)) -- the kv pairs we are sorting where the key is (tile, depth) as a u64
         
         -- the sorted gaussian keys are the keys of each copy of each gaussian in the big list.
         -- Each key contains a tile the given gaussian overlaps and the depth of that gaussian in the scene.
@@ -347,10 +351,8 @@ entry rasterize [n]
 
         -- tabulate on each pixel using our function
         let pixels = tabulate_2d (i64.i32 H) (i64.i32 W) (\y x -> f x y) :> [image_height][image_width][3]f32
-       -- let pixel_sum = map (map (\ls -> ls[0] + ls[1] + ls[2])) pixels
-       -- let p2 = map (reduce (+) 0) pixel_sum
-      --  let p3 = reduce (+) 0 p2
-        in pixels
+        let radii = map (\g -> g.radius) preprocessed
+        in (tiles_touched, radii, pixels)
 
 -- https://en.wikipedia.org/wiki/Structural_similarity_index_measure#Algorithm
 def ssim3 [n] [m] [o]
@@ -416,9 +418,10 @@ entry grad [n]
     (ssim_kernel_sigma: f32)
     (gt_image: [image_height][image_width][3]f32) 
     (lambda: f32) -- percentage of our loss that is ssim (the rest is L1)
-        : [n][14]f32 = 
-        let f =  (\(means3D, colors, opacities, scales, rotations) ->
-                let pix = rasterize background means3D colors opacities scales rotations
+       -- : [n][14]f32 = 
+       :f32 = 
+        let loss =  (\(means3D, colors, opacities, scales, rotations) ->
+                let (_, _, pix) = rasterize background means3D colors opacities scales rotations
                     view_matrix proj_matrix tan_fovx tan_fovy image_height image_width
                 
                 let kernel = gdist2d (i64.i32 ssim_kernel_size) ssim_kernel_sigma
@@ -427,16 +430,22 @@ entry grad [n]
                 let ssim = ssim3 kernel pix gt_image c1 c2
                 let l1abs = map2 (\a b -> f32.abs <| a - b) (flatten_3d pix) (flatten_3d gt_image)
                 let l1 = (reduce (+) 0 l1abs)  / (f32.i64 <| image_height * image_width * 3)
-                in  ((1-lambda)) * l1 + (lambda * ssim))
-        let a = (means3D, colors, opacities, scales, rotations)
-        let b = f a
-        let (dmeans, dcolors, dopacities, dscales, drotations) = vjp f a b
+
+                -- The formula given on Wikipedia has says dssim = (1-ssim)/2, but they do it like this
+                -- in kerbl et al's code, so we copy them.
+                let dssim = 1 - ssim
+
+                -- Eq 7 Kerbl et al.
+                in  ((1-lambda)) * l1 + (lambda * dssim))
+        let loss_inps = (means3D, colors, opacities, scales, rotations)
+        let (dmeans, dcolors, dopacities, dscales, drotations) = vjp loss loss_inps 1.0
         let packed = map (\(dmean, dcolor, dopacity, dscale, drot) -> 
                 [dmean[0], dmean[1], dmean[2], dcolor[0], dcolor[1], dcolor[2], dopacity[0], 
                  dscale[0], dscale[1], dscale[2], drot[0], drot[1], drot[2], drot[3]]
             ) <|zip5 dmeans dcolors dopacities dscales drotations
     
-        in packed
+        --in packed
+        in loss loss_inps
 
         --  #[trace] rasterize background means3D (#[trace] colors) opacities scales rotations
         --         view_matrix proj_matrix tan_fovx tan_fovy image_height image_width
