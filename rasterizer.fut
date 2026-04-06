@@ -297,20 +297,20 @@ entry rasterize [n]
     (opacities: [n][1]f32)
     (scales: [n][3]f32)
     (rotations: [n][4]f32)
-   -- (scale_modifier: f32)
-    --(cov3D_precomp: [][3][3]f32)
+   -- (scale_modifier: f32) -- unused
+    --(cov3D_precomp: [][3][3]f32) -- unused
     (view_matrix: [4][4]f32)
     (proj_matrix: [4][4]f32)
     (tan_fovx: f32)
     (tan_fovy: f32)
     (image_height: i64)
     (image_width: i64)
-    --(sh: [][3][]f32)
-  --  (degree: i32)
-  --  (campos: [3]f32)
-   -- (prefiltered: bool)
-   -- (debug: bool) --:  [n]([3]f32, [2]f32, [3]u64) =
-                    : (i32, []i32, [image_height][image_width][3]f32) = 
+    --(sh: [][3][]f32) -- unused
+  --  (degree: i32) -- unused
+  --  (campos: [3]f32) -- unused
+   -- (prefiltered: bool) -- unused
+   -- (debug: bool) --unused
+                    : ([n]i32, [image_height][image_width][3]f32) = 
                     --:f32 = 
         let H = i32.i64 image_height
         let W = i32.i64 image_width
@@ -322,12 +322,16 @@ entry rasterize [n]
 
         -- preprocess each gaussian in parallel. This generates our list of Gaussian2D records.
         -- Cull any gaussians not in frame
-        let preprocessed = filter (\g -> g.valid) <| map5
+        let preprocessed = map5
             (\mean scale rotation opacity color -> 
                 preprocess mean scale rotation view_matrix' proj_matrix' W H focalx focaly tan_fovx tan_fovy opacity[0] color tilesize)
             means3D scales rotations opacities colors
 
-        let num_tiles = map (\g -> g.tiles_touching) preprocessed
+        let radii = map (\g -> g.radius) preprocessed
+        
+        let preprocessed_culled = filter (\g -> g.valid) preprocessed
+
+        let num_tiles = map (\g -> g.tiles_touching) preprocessed_culled
 
         -- get the prefix sum of the number of tiles each gaussian touches
         let prefix_sum = rotate (-1) <| scan (+) 0 num_tiles
@@ -339,7 +343,7 @@ entry rasterize [n]
             (\(k,_) -> k)          -- extract the key
             64                     -- sort on 64 bit keys
             (\i k -> i32.u64 (k >> (u64.i32 i) & 1)) -- get the ith bit
-            (map (generateElem preprocessed prefix_sum W tilesize) (iota <| i64.i32 tiles_touched)) -- the kv pairs we are sorting where the key is (tile, depth) as a u64
+            (map (generateElem preprocessed_culled prefix_sum W tilesize) (iota <| i64.i32 tiles_touched)) -- the kv pairs we are sorting where the key is (tile, depth) as a u64
         
         -- the sorted gaussian keys are the keys of each copy of each gaussian in the big list.
         -- Each key contains a tile the given gaussian overlaps and the depth of that gaussian in the scene.
@@ -351,8 +355,7 @@ entry rasterize [n]
 
         -- tabulate on each pixel using our function
         let pixels = tabulate_2d (i64.i32 H) (i64.i32 W) (\y x -> f x y) :> [image_height][image_width][3]f32
-        let radii = map (\g -> g.radius) preprocessed
-        in (tiles_touched, radii, pixels)
+        in (radii, pixels)
 
 -- https://en.wikipedia.org/wiki/Structural_similarity_index_measure#Algorithm
 def ssim3 [n] [m] [o]
@@ -419,10 +422,14 @@ entry grad [n]
     (gt_image: [image_height][image_width][3]f32) 
     (lambda: f32) -- percentage of our loss that is ssim (the rest is L1)
        -- : [n][14]f32 = 
-       :f32 = 
+       --:f32 = 
+       : ([n][3]f32, [n][3]f32, [n][1]f32, [n][3]f32, [n][4]f32, f32) = 
         let loss =  (\(means3D, colors, opacities, scales, rotations) ->
-                let (_, _, pix) = rasterize background means3D colors opacities scales rotations
+                let (radii, pix) = rasterize background means3D colors opacities scales rotations
                     view_matrix proj_matrix tan_fovx tan_fovy image_height image_width
+                
+                let pix_alias = pix
+                let radii_alias = radii
                 
                 let kernel = gdist2d (i64.i32 ssim_kernel_size) ssim_kernel_sigma
                 let c1 = 0.01**2
@@ -436,16 +443,17 @@ entry grad [n]
                 let dssim = 1 - ssim
 
                 -- Eq 7 Kerbl et al.
-                in  ((1-lambda)) * l1 + (lambda * dssim))
+                let loss_alias = ((1-lambda)) * l1 + (lambda * dssim)
+                in loss_alias)
         let loss_inps = (means3D, colors, opacities, scales, rotations)
         let (dmeans, dcolors, dopacities, dscales, drotations) = vjp loss loss_inps 1.0
-        let packed = map (\(dmean, dcolor, dopacity, dscale, drot) -> 
-                [dmean[0], dmean[1], dmean[2], dcolor[0], dcolor[1], dcolor[2], dopacity[0], 
-                 dscale[0], dscale[1], dscale[2], drot[0], drot[1], drot[2], drot[3]]
-            ) <|zip5 dmeans dcolors dopacities dscales drotations
+        -- let packed = map (\(dmean, dcolor, dopacity, dscale, drot) -> 
+        --         [dmean[0], dmean[1], dmean[2], dcolor[0], dcolor[1], dcolor[2], dopacity[0], 
+        --          dscale[0], dscale[1], dscale[2], drot[0], drot[1], drot[2], drot[3]]
+        --     ) <|zip5 dmeans dcolors dopacities dscales drotations
     
         --in packed
-        in loss loss_inps
+        in (dmeans, dcolors, dopacities, dscales, drotations, loss loss_inps)
 
         --  #[trace] rasterize background means3D (#[trace] colors) opacities scales rotations
         --         view_matrix proj_matrix tan_fovx tan_fovy image_height image_width
