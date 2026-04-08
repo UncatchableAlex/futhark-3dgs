@@ -96,6 +96,8 @@ with open(f'./rasterizer_inps/{json_name}', 'r') as f:
 n = 10000000000 # how many gaussians we want to render
 
 
+test_forward = False
+
 # prep  inputs as numpy arrays with correct dtypes
 inputs = {
     'bg':           np.array([0,0,0],                       dtype=np.float32),
@@ -110,20 +112,39 @@ inputs = {
     'tanfovy':      np.float32(inps['tanfovy']),
     'image_height': np.int64(inps['image_height']),
     'image_width':  np.int64(inps['image_width']),
-    'ssim_kernel_size': np.int32(11),
-    'ssim_kernel_sigma': np.float32(1.5),
-    'gt_image': np.array([[[0.0,0.0,0.0]]],                                dtype=np.float32),
-    'lambda' : np.float32(0.2)
-}
+}    
 
 with futhark_server.Server('./rasterizer') as server:
 
+    # store each input as a named variable
+    if test_forward:
+        for name, value in inputs.items():
+            server.put_value(name, value)
+        server.cmd_call(
+                "rasterize",
+                'radii',
+                'pixels',                   
+                *inputs.keys()
+                )
+        radii = server.get_value('radii')
+        pixels = server.get_value('pixels')
+        print(radii.shape, radii[:50], pixels.shape, pixels[:50])
+        plt.imshow(pixels)
+        plt.axis("off")
+        plt.savefig(f'image.png', bbox_inches="tight", pad_inches=0)
+
+        raise Exception("Stop")
+
+    inputs.update({'ssim_kernel_size': np.int32(11),
+                'ssim_kernel_sigma': np.float32(1.5),
+                'gt_image': np.array([[[0.0,0.0,0.0]]], dtype=np.float32),
+                'lambda' : np.float32(0.2)})
     # store each input as a named variable
     for name, value in inputs.items():
         server.put_value(name, value)
 
     frames = 50
-    image_dir = '/mnt/c/users/alexm/2026_spring/Thesis/tandt/train/images'
+    image_dir = '/home/mjk711/gaussian-splatting/tandt/train/images'
     for filename in os.listdir(image_dir):
         if filename.endswith('.jpg'):
             gt = np.array(plt.imread(f'{image_dir}/{filename}'), dtype=np.float32)
@@ -131,16 +152,22 @@ with futhark_server.Server('./rasterizer') as server:
             continue
         server.cmd_free('gt_image')
         server.put_value('gt_image',np.array(gt/255, dtype=np.float32))
-        print(*inputs.keys())
+        #print(*inputs.keys())
         #bg means3D colors opacities scales rotations viewmatrix projmatrix tanfovx tanfovy image_height image_width ssim_kernel_size ssim_kernel_sigma gt_image
         server.cmd_call(
             "grad",
-            'output',                   
+            'dmeans', 
+            'dcolors', 
+            'dopacities', 
+            'dscales', 
+            'drotations', 
+            'loss',                 
             *inputs.keys()
         )
-        result = server.get_value('output')
-        print(result.shape)
-        raise Exception("stop")
+        result = server.get_value('loss')
+        print(filename, result)
+        raise Exception("Stop")
+        #raise Exception("stop")
 #     for i in tqdm(range(0,frames)):
 #         server.cmd_free('viewmatrix')
 #         r = np.linalg.norm([1.24382517, 3.278445])
@@ -155,7 +182,7 @@ with futhark_server.Server('./rasterizer') as server:
 #             *inputs.keys()
 #         )
 #         result = server.get_value('output')
-#         plt.imsh+ow(result)
+#         plt.imshow(result)
 #         plt.axis("off")
 #         plt.savefig(f'images/{i:02d}.png', bbox_inches="tight", pad_inches=0)
 #         server.cmd_free('output')

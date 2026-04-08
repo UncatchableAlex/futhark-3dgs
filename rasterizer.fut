@@ -14,6 +14,8 @@
 import "util"
 import "lib/github.com/diku-dk/sorts/radix_sort"
 
+let TILESIZE = 16i32
+
 -- check if a point is in the view frustum with a quick heuristic approximation
 def in_frustum (p: [3]f32) (view_matrix: [4][4]f32) (proj_matrix: [4][4]f32): bool = 
         -- bring the point into camera space 
@@ -104,7 +106,7 @@ def compute_cov_2D
 
 -- preprocess each gaussian by determining which tiles it touches, the size of its largest radius
 -- its conic, 
-def preprocess 
+def preprocess
    -- (P: i32) -- n
     --(D: i32) -- degree (for SH)
     --(M: i32) -- for SH (kinda mysterious)
@@ -123,8 +125,7 @@ def preprocess
     (W: i32) (H: i32)
     (focal_x: f32) (focal_y: f32)
     (tan_fovx: f32) (tan_fovy: f32)
-    (opacity: f32) (color: [3]f32)
-    (tilesize: i32): Gaussian2D  =  -- conic, mean2d, bounding box, num_tiles, depth, opacity, color
+    (opacity: f32) (color: [3]f32) : Gaussian2D =
 
         -- immediately return an empty value if the gaussian is not in view
         let in_view = in_frustum mean viewmatrix projmatrix
@@ -185,7 +186,7 @@ def preprocess
 
         -- calculate a bounding box for the support of our gaussian in pixel space. Define the box with 3 std deviations from the mean
         -- in the most stretched direction (either lambda1 or lambda2) 
-        let (ylo,yhi,xlo,xhi): (i32,i32,i32,i32) = get_rect_2d pix std3 W H tilesize
+        let (ylo,yhi,xlo,xhi): (i32,i32,i32,i32) = get_rect_2d pix std3 W H TILESIZE
         let num_tiles:i32 = (yhi - ylo) * (xhi-xlo)
         in if num_tiles == 0 then badG else {
                 opacity=opacity,
@@ -207,7 +208,6 @@ def generateElem [n]
     (gs: [n]Gaussian2D)
     (prefix_sum: [n]i32) 
     (W: i32)
-    (tilesize: i32) 
     (idx: i64): (u64, i32) =
     -- search to find which gaussian this index refers to
     let bs = binary_search prefix_sum (i32.i64 idx) u64.i32 --binary_search
@@ -222,14 +222,13 @@ def generateElem [n]
     let offset = (i32.i64 idx) - prefix_sum[n_idx] 
     let tile_y = ylo + (offset / (xhi - xlo))
     let tile_x =  xlo + (offset % (xhi - xlo))
-    let tile = tile_y * ((W + tilesize - 1) / tilesize) + tile_x
+    let tile = tile_y * ((W + TILESIZE - 1) / TILESIZE) + tile_x
     let upper =  ((u64.i32 tile) u64.<< 32)
     let key = upper | (u64.u32 <| f32.to_bits depth)
     in (key,n_idx)
 
 -- Calculate the color of each pixel!
 def pixel_color [n] [m]
-    (tilesize: i64) 
     (W: i64)
     (sorted_keys: [m]u64) 
     (sorted_indices: [m]i32)
@@ -238,9 +237,10 @@ def pixel_color [n] [m]
     (pix_x: i64)
     (pix_y: i64) : [3]f32 = --(f32, f32, f32)  = -- output: rgb 
         -- our pixel's tile
-        let tile_y = pix_y / tilesize
-        let tile_x = pix_x / tilesize
-        let tile = tile_y * ((W + tilesize - 1) / tilesize) + tile_x
+        let ts = i64.i32 TILESIZE
+        let tile_y = pix_y / ts
+        let tile_x = pix_x / ts
+        let tile = tile_y * ((W + ts - 1) / ts) + tile_x
 
 
         let start = binary_search sorted_keys ((u64.i64 tile) << 32) id
@@ -284,7 +284,70 @@ def pixel_color [n] [m]
             f32.min 1 (bg_T * bg[0] + pr), 
             f32.min 1 (bg_T * bg[1] + pg), 
             f32.min 1 (bg_T * bg[2] + pb)]
+
+
+def rasterize2dGaussians [n] 
+    (g2ds: [n]Gaussian2D)
+    (background: [3]f32)
+    (image_height: i64)
+    (image_width: i64) : ([n]i32, [image_height][image_width][3]f32) = 
+
+        let H = i32.i64 image_height
+        let W = i32.i64 image_width
+
+        let radii = map (\g -> g.radius) g2ds
         
+        let g2ds_culled = filter (\g -> g.valid) g2ds
+
+        let num_tiles = map (\g -> g.tiles_touching) g2ds_culled
+
+        -- get the prefix sum of the number of tiles each gaussian touches
+        let prefix_sum = rotate (-1) <| scan (+) 0 num_tiles
+        let tiles_touched = prefix_sum[0]
+        let prefix_sum[0] = 0 -- fix the first element of the prefix sum since rotate will have messed it up
+
+        let sorted_list = blocked_radix_sort_by_key
+            256i16                 -- block size for a100 gpu
+            (\(k,_) -> k)          -- extract the key
+            64                     -- sort on 64 bit keys
+            (\i k -> i32.u64 (k >> (u64.i32 i) & 1)) -- get the ith bit
+            (map (generateElem g2ds_culled prefix_sum W) (iota <| i64.i32 tiles_touched)) -- the kv pairs we are sorting where the key is (tile, depth) as a u64
+        
+        -- the sorted gaussian keys are the keys of each copy of each gaussian in the big list.
+        -- Each key contains a tile the given gaussian overlaps and the depth of that gaussian in the scene.
+        -- The sorted indices list contains the indices of each gaussian in the gaussian list.
+        let (sorted_gaussian_keys, sorted_gaussian_indices) = unzip sorted_list
+
+        -- define a function to find the color of a pixel
+        let f = pixel_color image_width sorted_gaussian_keys sorted_gaussian_indices background g2ds_culled
+
+        -- tabulate on each pixel using our function
+        let pixels = tabulate_2d (i64.i32 H) (i64.i32 W) (\y x -> f x y) :> [image_height][image_width][3]f32
+        in (radii, pixels)
+
+
+def compute2dGaussians [n]
+    (means3D: [n][3]f32)
+    (colors: [n][3]f32)
+    (opacities: [n][1]f32)
+    (scales: [n][3]f32)
+    (rotations: [n][4]f32)
+    (view_matrix: [4][4]f32)
+    (proj_matrix: [4][4]f32)
+    (tan_fovx: f32)
+    (tan_fovy: f32)
+    (H: i32)
+    (W: i32): [n]Gaussian2D = 
+        let focalx = (f32.i32 W) / (2*tan_fovx)
+        let focaly = (f32.i32 H) / (2*tan_fovy)
+        let proj_matrix' = transpose proj_matrix
+        let view_matrix' = transpose view_matrix
+
+        -- preprocess each gaussian in parallel. This generates our list of Gaussian2D records.
+        in map5
+            (\mean scale rotation opacity color -> 
+                preprocess mean scale rotation view_matrix' proj_matrix' W H focalx focaly tan_fovx tan_fovy opacity[0] color)
+            means3D scales rotations opacities colors
 
 
 -- Our exposed rasterize function. In this function, we take the means, scales, 
@@ -310,52 +373,12 @@ entry rasterize [n]
   --  (campos: [3]f32) -- unused
    -- (prefiltered: bool) -- unused
    -- (debug: bool) --unused
-                    : ([n]i32, [image_height][image_width][3]f32) = 
-                    --:f32 = 
+    : ([n]i32, [image_height][image_width][3]f32) =
         let H = i32.i64 image_height
         let W = i32.i64 image_width
-        let tilesize = 16
-        let focalx = (f32.i32 W) / (2*tan_fovx)
-        let focaly = (f32.i32 H) / (2*tan_fovy)
-        let proj_matrix' = transpose proj_matrix
-        let view_matrix' = transpose view_matrix
-
-        -- preprocess each gaussian in parallel. This generates our list of Gaussian2D records.
-        -- Cull any gaussians not in frame
-        let preprocessed = map5
-            (\mean scale rotation opacity color -> 
-                preprocess mean scale rotation view_matrix' proj_matrix' W H focalx focaly tan_fovx tan_fovy opacity[0] color tilesize)
-            means3D scales rotations opacities colors
-
-        let radii = map (\g -> g.radius) preprocessed
-        
-        let preprocessed_culled = filter (\g -> g.valid) preprocessed
-
-        let num_tiles = map (\g -> g.tiles_touching) preprocessed_culled
-
-        -- get the prefix sum of the number of tiles each gaussian touches
-        let prefix_sum = rotate (-1) <| scan (+) 0 num_tiles
-        let tiles_touched = prefix_sum[0]
-        let prefix_sum[0] = 0 -- fix the first element of the prefix sum since rotate will have messed it up
-
-        let sorted_list = blocked_radix_sort_by_key
-            256i16                 -- block size for a100 gpu
-            (\(k,_) -> k)          -- extract the key
-            64                     -- sort on 64 bit keys
-            (\i k -> i32.u64 (k >> (u64.i32 i) & 1)) -- get the ith bit
-            (map (generateElem preprocessed_culled prefix_sum W tilesize) (iota <| i64.i32 tiles_touched)) -- the kv pairs we are sorting where the key is (tile, depth) as a u64
-        
-        -- the sorted gaussian keys are the keys of each copy of each gaussian in the big list.
-        -- Each key contains a tile the given gaussian overlaps and the depth of that gaussian in the scene.
-        -- The sorted indices list contains the indices of each gaussian in the gaussian list.
-        let (sorted_gaussian_keys, sorted_gaussian_indices) = unzip sorted_list
-
-        -- define a function to find the color of a pixel
-        let f = pixel_color 16 (i64.i32 W) sorted_gaussian_keys sorted_gaussian_indices background preprocessed
-
-        -- tabulate on each pixel using our function
-        let pixels = tabulate_2d (i64.i32 H) (i64.i32 W) (\y x -> f x y) :> [image_height][image_width][3]f32
-        in (radii, pixels)
+        let gaussians = compute2dGaussians means3D colors opacities scales rotations view_matrix proj_matrix tan_fovx tan_fovy H W
+        in rasterize2dGaussians gaussians background image_height image_width
+   -- rasterize_ preprocessed background H W TILESIZE image_height image_width
 
 -- https://en.wikipedia.org/wiki/Structural_similarity_index_measure#Algorithm
 def ssim3 [n] [m] [o]
@@ -403,6 +426,33 @@ def gdist2d (n: i64) (sigma: f32) =
     in tabulate_2d n n (\x y -> g1d[x] * g1d[y] / (sum*sum))
 
 
+def loss
+    (image_height: i64)
+    (image_width: i64)
+    (ssim_kernel_size: i32)
+    (ssim_kernel_sigma: f32)
+    (pix: [image_height][image_width][3]f32) 
+    (gt_image: [image_height][image_width][3]f32) 
+    (lambda: f32) -- percentage of our loss that is ssim (the rest is L1)
+    : f32 = 
+        -- calculate the ssim3 loss
+        let kernel = gdist2d (i64.i32 ssim_kernel_size) ssim_kernel_sigma
+        let c1 = 0.01**2
+        let c2 = 0.03**2
+        let ssim = ssim3 kernel pix gt_image c1 c2
+
+        -- calculate the L1 loss
+        let l1abs = map2 (\a b -> f32.abs <| a - b) (flatten_3d pix) (flatten_3d gt_image)
+        let l1 = (reduce (+) 0 l1abs)  / (f32.i64 <| image_height * image_width * 3)
+
+        -- The formula given on Wikipedia has says dssim = (1-ssim)/2, but they do it like this
+        -- in kerbl et al's code, so we copy them.
+        let dssim = 1 - ssim
+
+        -- Eq 7 Kerbl et al. calls for a linear combination of L1 and DSSIM losses
+        in ((1-lambda)) * l1 + (lambda * dssim)
+
+
 
 entry grad [n] 
     (background: [3]f32)
@@ -420,40 +470,61 @@ entry grad [n]
     (ssim_kernel_size: i32)
     (ssim_kernel_sigma: f32)
     (gt_image: [image_height][image_width][3]f32) 
-    (lambda: f32) -- percentage of our loss that is ssim (the rest is L1)
-       -- : [n][14]f32 = 
-       --:f32 = 
+    (lambda: f32) -- percentage of our loss that is dssim (the rest is L1)
        : ([n][3]f32, [n][3]f32, [n][1]f32, [n][3]f32, [n][4]f32, f32) = 
-        let loss =  (\(means3D, colors, opacities, scales, rotations) ->
-                let (radii, pix) = rasterize background means3D colors opacities scales rotations
+        let loss' =  
+            \(means3D, colors, opacities, scales, rotations) -> (
+                let (_, pix) = rasterize background means3D colors opacities scales rotations
                     view_matrix proj_matrix tan_fovx tan_fovy image_height image_width
-                
-                let pix_alias = pix
-                let radii_alias = radii
-                
-                let kernel = gdist2d (i64.i32 ssim_kernel_size) ssim_kernel_sigma
-                let c1 = 0.01**2
-                let c2 = 0.03**2
-                let ssim = ssim3 kernel pix gt_image c1 c2
-                let l1abs = map2 (\a b -> f32.abs <| a - b) (flatten_3d pix) (flatten_3d gt_image)
-                let l1 = (reduce (+) 0 l1abs)  / (f32.i64 <| image_height * image_width * 3)
+                in loss image_height image_width ssim_kernel_size ssim_kernel_sigma pix gt_image lambda)
 
-                -- The formula given on Wikipedia has says dssim = (1-ssim)/2, but they do it like this
-                -- in kerbl et al's code, so we copy them.
-                let dssim = 1 - ssim
+        let inps = (means3D, colors, opacities, scales, rotations)
+        let (primal, (dmeans3D, dcolors, dopacities, dscales, drotations)) = vjp2 loss' inps 1.0
+        in (dmeans3D, dcolors, dopacities, dscales, drotations, primal)
 
-                -- Eq 7 Kerbl et al.
-                let loss_alias = ((1-lambda)) * l1 + (lambda * dssim)
-                in loss_alias)
-        let loss_inps = (means3D, colors, opacities, scales, rotations)
-        let (dmeans, dcolors, dopacities, dscales, drotations) = vjp loss loss_inps 1.0
-        -- let packed = map (\(dmean, dcolor, dopacity, dscale, drot) -> 
-        --         [dmean[0], dmean[1], dmean[2], dcolor[0], dcolor[1], dcolor[2], dopacity[0], 
-        --          dscale[0], dscale[1], dscale[2], drot[0], drot[1], drot[2], drot[3]]
-        --     ) <|zip5 dmeans dcolors dopacities dscales drotations
-    
-        --in packed
-        in (dmeans, dcolors, dopacities, dscales, drotations, loss loss_inps)
+
+-- We need to have a separate function to get the derivative of the loss w.r.t the screenspace gaussian means
+-- for the densification calculation. We need to know which gaussians to split and which to duplicate based 
+-- on this derivative. We cannot calculate this with the other grad function because it is an intermediate result.
+entry dL_dmeans2d [n] 
+    (background: [3]f32)
+    (means3D: [n][3]f32)
+    (colors: [n][3]f32)
+    (opacities: [n][1]f32)
+    (scales: [n][3]f32)
+    (rotations: [n][4]f32)
+    (view_matrix: [4][4]f32)
+    (proj_matrix: [4][4]f32)
+    (tan_fovx: f32)
+    (tan_fovy: f32)
+    (image_height: i64)
+    (image_width: i64)
+    (ssim_kernel_size: i32)
+    (ssim_kernel_sigma: f32)
+    (gt_image: [image_height][image_width][3]f32) 
+    (lambda: f32) : [n][2]f32 = -- percentage of our loss that is dssim (the rest is L1)
+
+        let H = i32.i64 image_height
+        let W = i32.i64 image_width
+
+        -- calculate the 2d gaussian means
+        let g2ds = compute2dGaussians means3D colors opacities scales rotations
+            view_matrix proj_matrix tan_fovx tan_fovy H W
+        let means2D = map (\g -> g.mean) g2ds
+
+        -- f: 2dmeans -> loss
+        let f = \means2D -> (
+            let g2ds' = map2 (\(g: Gaussian2D) m -> g with mean = m) g2ds means2D
+            let (_, pix) = rasterize2dGaussians g2ds' background image_height image_width
+            in loss image_height image_width ssim_kernel_size ssim_kernel_sigma pix gt_image lambda)
+
+        -- dL/dmeans2d:
+        let losses = vjp f means2D 1.0
+
+        -- listification for stdout compatibility
+        in map (\t -> [t.0, t.1]) losses
+
+ 
 
         --  #[trace] rasterize background means3D (#[trace] colors) opacities scales rotations
         --         view_matrix proj_matrix tan_fovx tan_fovy image_height image_width
@@ -462,3 +533,4 @@ entry grad [n]
 -- let viewmatrix = [[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0f32]]
 -- let projmatrix = viewmatrix
 -- rasterize' [0,0,0] [[0,0,0]] [[0,0,0]] [[0]] [[0,0,0]] [[0,0,0,0]] viewmatrix projmatrix  0 0 1 1 0 0 [[[0,0,0]]]
+-- 0.2931305170059204
