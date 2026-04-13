@@ -4,6 +4,11 @@ import futhark_server
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
+
+# the whole point of this script is to test the accuracy and performance of
+# calculating dL/dm_2d
+
+
 json_name = 'debug_rasterizer_settings.json'
 image_dir = '/home/mjk711/gaussian-splatting/tandt/train/images'
 rasterizer_inps = './rasterizer_inps'
