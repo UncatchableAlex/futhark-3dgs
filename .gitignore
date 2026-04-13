@@ -12,3 +12,5 @@ lib
 images
 *.avi
 *.png
+*.egg-info
+test_outputs
