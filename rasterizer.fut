@@ -471,25 +471,44 @@ entry grad [n]
     (ssim_kernel_sigma: f32)
     (gt_image: [image_height][image_width][3]f32) 
     (lambda: f32) -- percentage of our loss that is dssim (the rest is L1)
-       : ([n][3]f32, [n][3]f32, [n][1]f32, [n][3]f32, [n][4]f32, f32, [n]i32) = 
+       : ([n][3]f32, [n][2]f32, [n][3]f32, [n][1]f32, [n][3]f32, [n][4]f32, f32, [n]i32) = 
         let H = i32.i64 image_height
         let W = i32.i64 image_width
-        let loss' =  
-            \(means3D, colors, opacities, scales, rotations) -> (
+
+        -- calculate the 2D means of the gaussians and dm_2D/dm_3D
+        let project_means = \means3D' -> (
+            let gaussians = compute2dGaussians means3D' colors opacities scales rotations view_matrix proj_matrix tan_fovx tan_fovy H W 
+            in map (\(g: Gaussian2D) -> g.mean) gaussians
+        ) 
+
+        -- get the first row of the dm_2/dm_3 jacobian
+        let (means2D, d2D_3D_1s) = vjp2 project_means means3D (rep (1,0))
+
+        -- get the second row of the dm_2/dm_3 jacobian
+        let (_, d2D_3D_2s) = vjp2 project_means means3D (rep (0,1))
+
+        -- define a forward pass to get the loss
+        let forward =  
+            \(means2D, colors, opacities, scales, rotations) -> (
                 let gaussians = compute2dGaussians means3D colors opacities scales rotations view_matrix 
                     proj_matrix tan_fovx tan_fovy H W
-                let (radii, pix) = rasterize2dGaussians gaussians background image_height image_width
+                let gaussians' = map2 (\(g: Gaussian2D) m -> g with mean = m) gaussians means2D
+                let (radii, pix) = rasterize2dGaussians gaussians' background image_height image_width
                 let l = loss image_height image_width ssim_kernel_size ssim_kernel_sigma pix gt_image lambda
                 in (l, radii))
 
-                -- calculate the 2d gaussian means
-        -- let g2ds = compute2dGaussians means3D colors opacities scales rotations
-        --     view_matrix proj_matrix tan_fovx tan_fovy H W
-        -- let means2D = map (\g -> g.mean) g2ds
+        -- inputs to our forward pass
+        let inps = (means2D, colors, opacities, scales, rotations)
 
-        let inps = (means3D, colors, opacities, scales, rotations)
-        let ((loss'', radii), (dmeans3D, dcolors, dopacities, dscales, drotations)) = vjp2 loss' inps (1.0, rep 0)
-        in (dmeans3D, dcolors, dopacities, dscales, drotations, loss'', radii)
+        -- perform a full forward and backward pass on our loss calculation
+        let ((loss'', radii), (dmeans2D, dcolors, dopacities, dscales, drotations)) = vjp2 forward inps (1.0, rep 0)
+
+        let dmeans2D' = map (\m -> [m.0, m.1]) dmeans2D
+
+        -- use the chain rule to calculate dL/dm_3
+        let dmeans3D = map3 transform_point_2x3_split_row dmeans2D' d2D_3D_1s d2D_3D_2s
+
+        in (dmeans3D, dmeans2D', dcolors, dopacities, dscales, drotations, loss'', radii)
 
 
 -- We need to have a separate function to get the derivative of the loss w.r.t the screenspace gaussian means

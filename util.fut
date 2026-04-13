@@ -22,6 +22,13 @@ def matmul_f32 [n][m][p] (A: [n][m]f32) (B: [m][p]f32) : [n][p]f32 =
              (transpose B))
       A
 
+def transform_point_2x3_split_row (p: [2]f32) (T1:[3]f32) (T2:[3]f32) = 
+    [
+        T1[0]*p[0] + T2[0]*p[1],
+        T1[1]*p[0] + T2[1]*p[1],
+        T1[2]*p[0] + T2[2]*p[1]
+    ]
+
 def transform_point_4x3 (p: [3]f32) (T: [4][4]f32) : [3]f32 = 
     [
         T[0][0]*p[0] + T[0][1]*p[1] + T[0][2]*p[2] + T[0][3],
