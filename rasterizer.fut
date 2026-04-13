@@ -452,46 +452,6 @@ def loss
         -- Eq 7 Kerbl et al. calls for a linear combination of L1 and DSSIM losses
         in ((1-lambda)) * l1 + (lambda * dssim)
 
-
-
-entry grad [n] 
-    (background: [3]f32)
-    (means3D: [n][3]f32)
-    (colors: [n][3]f32)
-    (opacities: [n][1]f32)
-    (scales: [n][3]f32)
-    (rotations: [n][4]f32)
-    (view_matrix: [4][4]f32)
-    (proj_matrix: [4][4]f32)
-    (tan_fovx: f32)
-    (tan_fovy: f32)
-    (image_height: i64)
-    (image_width: i64)
-    (ssim_kernel_size: i32)
-    (ssim_kernel_sigma: f32)
-    (gt_image: [image_height][image_width][3]f32) 
-    (lambda: f32) -- percentage of our loss that is dssim (the rest is L1)
-       : ([n][3]f32, [n][3]f32, [n][1]f32, [n][3]f32, [n][4]f32, f32, [n]i32) = 
-        let H = i32.i64 image_height
-        let W = i32.i64 image_width
-        let loss' =  
-            \(means3D, colors, opacities, scales, rotations) -> (
-                let gaussians = compute2dGaussians means3D colors opacities scales rotations view_matrix 
-                    proj_matrix tan_fovx tan_fovy H W
-                let (radii, pix) = rasterize2dGaussians gaussians background image_height image_width
-                let l = loss image_height image_width ssim_kernel_size ssim_kernel_sigma pix gt_image lambda
-                in (l, radii))
-
-                -- calculate the 2d gaussian means
-        -- let g2ds = compute2dGaussians means3D colors opacities scales rotations
-        --     view_matrix proj_matrix tan_fovx tan_fovy H W
-        -- let means2D = map (\g -> g.mean) g2ds
-
-        let inps = (means3D, colors, opacities, scales, rotations)
-        let ((loss'', radii), (dmeans3D, dcolors, dopacities, dscales, drotations)) = vjp2 loss' inps (1.0, rep 0)
-        in (dmeans3D, dcolors, dopacities, dscales, drotations, loss'', radii)
-
-
 -- We need to have a separate function to get the derivative of the loss w.r.t the screenspace gaussian means
 -- for the densification calculation. We need to know which gaussians to split and which to duplicate based 
 -- on this derivative. We cannot calculate this with the other grad function because it is an intermediate result.
@@ -532,6 +492,43 @@ entry dL_dmeans2d [n]
 
         -- listification for stdout compatibility
         in map (\t -> [t.0, t.1]) losses
+
+
+
+entry grad [n] 
+    (background: [3]f32)
+    (means3D: [n][3]f32)
+    (colors: [n][3]f32)
+    (opacities: [n][1]f32)
+    (scales: [n][3]f32)
+    (rotations: [n][4]f32)
+    (view_matrix: [4][4]f32)
+    (proj_matrix: [4][4]f32)
+    (tan_fovx: f32)
+    (tan_fovy: f32)
+    (image_height: i64)
+    (image_width: i64)
+    (ssim_kernel_size: i32)
+    (ssim_kernel_sigma: f32)
+    (gt_image: [image_height][image_width][3]f32) 
+    (lambda: f32) -- percentage of our loss that is dssim (the rest is L1)
+       : ([n][3]f32, [n][2]f32, [n][3]f32, [n][1]f32, [n][3]f32, [n][4]f32, f32, [n]i32) = 
+        let H = i32.i64 image_height
+        let W = i32.i64 image_width
+        let loss' =  
+            \(means3D, colors, opacities, scales, rotations) -> (
+                let gaussians = compute2dGaussians means3D colors opacities scales rotations view_matrix 
+                    proj_matrix tan_fovx tan_fovy H W
+                let (radii, pix) = rasterize2dGaussians gaussians background image_height image_width
+                let l = loss image_height image_width ssim_kernel_size ssim_kernel_sigma pix gt_image lambda
+                in (l, radii))
+
+        let inps = (means3D, colors, opacities, scales, rotations)
+        let ((loss'', radii), (dmeans3D, dcolors, dopacities, dscales, drotations)) = vjp2 loss' inps (1.0, rep 0)
+        let dmeans2d = dL_dmeans2d background means3D colors opacities scales rotations view_matrix proj_matrix
+                            tan_fovx tan_fovy image_height image_width ssim_kernel_size ssim_kernel_sigma gt_image lambda
+        in (dmeans3D, dmeans2d, dcolors, dopacities, dscales, drotations, loss'', radii)
+
 
  
 
