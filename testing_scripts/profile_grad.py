@@ -7,12 +7,12 @@ import time
 
 
 # the whole point of this script is to test the accuracy and performance of
-# calculating dL/dm_2d
+# calculating gaussian gradients
 
 
-json_name = 'debug_rasterizer_settings.json'
-image_dir = '/home/mjk711/gaussian-splatting/tandt/train/images'
-rasterizer_inps = './rasterizer_inps'
+image_path = '/home/mjk711/gaussian-splatting/tandt/train/images/00124.jpg'
+rasterizer_inps = '../rasterizer_inps'
+rasterizer_path = '../futhark_rasterizer/rasterizer'
 
 np_names = [
     'colors_precomp',
@@ -30,19 +30,15 @@ for np_name in np_names:
         np_array = np.load(f)
         inps[np_name] = np_array
 
-with open(f'./rasterizer_inps/{json_name}', 'r') as f:
+with open(f'{rasterizer_inps}/debug_rasterizer_settings.json', 'r') as f:
     json_data = json.load(f)
     inps.update(json_data)
-
-test_forward = False
 
 ns = [100, 1000, 5000, 10000, 20000, 30000, 40000, 50000,100000,150000]
 times = []
 
-with futhark_server.Server('./rasterizer') as server:
-    filename = f'00124.jpg'
-    gt = np.array(plt.imread(f'{image_dir}/{filename}'), dtype=np.float32) / 255.0
-
+with futhark_server.Server(rasterizer_path) as server:
+    gt = np.array(plt.imread(image_path), dtype=np.float32) / 255.0
     for n in ns:
         inputs = {
             'bg':           np.array([0,0,0],                               dtype=np.float32),
