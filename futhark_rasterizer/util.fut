@@ -75,10 +75,13 @@ def scale_to_mat (s: [3]f32) : [3][3]f32 =
         [0,0,s[2]]
     ]
 
--- convert a coordinate from normalized device coordinates (-1 to 1)
--- to a pixel value
+-- convert a coordinate from normalized device coordinates (-1 to 1) to a pixel value
 def ndc_to_pix (v: f32) (s: i32) : f32 = 
     ((v + 1.0) * (f32.i32 s) - 1) * 0.5
+
+-- convert a coordinate from a pixel value to normalized device coordinates (-1 to 1)
+def pix_to_ndc (v: f32) (s: i32) : f32 =
+    (2.0 * v + 1.0) / (f32.i32 s) - 1.0
 
 
 def get_rect_2d (x:f32, y:f32) (radius: f32) (W: i32) (H: i32) (tilesize: i32): (i32,i32,i32,i32) =
