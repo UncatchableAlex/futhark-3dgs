@@ -174,3 +174,5 @@ with Futhark_Rasterization_Server() as server:
         server.cmd_free(var)
         if np.array([outs1[var]]).flatten().shape[0] < 100:
             print(f'{var}: {outs1[var]}')
+
+    plt.imsave("output.png", outs1['pix'])

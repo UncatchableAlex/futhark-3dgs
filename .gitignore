@@ -12,5 +12,7 @@ lib
 images
 *.avi
 *.png
+*.jpg
 *.egg-info
 test_outputs
+*.mp4

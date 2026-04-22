@@ -8,8 +8,9 @@ from typing import NamedTuple
 import torch.nn as nn
 import numpy as np
 import torch
-import json
 from futhark_server import Server
+import os
+
 
 def cpu_deep_copy_tuple(input_tuple):
     copied_tensors = [item.cpu().clone() if isinstance(item, torch.Tensor) else item for item in input_tuple]
@@ -25,6 +26,12 @@ def to_torch(v):
     return torch.from_numpy(np.copy(v)).cuda()
 
 
+class Futhark_Rasterization_Server(Server):
+    def __init__(self):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        rasterizer_path = os.path.join(base_dir, '..', 'futhark_rasterizer', 'rasterizer')
+        rasterizer_path = os.path.abspath(rasterizer_path)
+        super().__init__(rasterizer_path)
 
 def rasterize_gaussians(
     means3D,
@@ -75,8 +82,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             'opacities':    to_numpy(opacities),
             'scales':       to_numpy(scales),
             'rotations':    to_numpy(rotations),
-            'viewmatrix':   to_numpy(raster_settings.viewmatrix).T,
-            'projmatrix':   to_numpy(raster_settings.projmatrix).T,
+            'viewmatrix':   to_numpy(raster_settings.viewmatrix),
+            'projmatrix':   to_numpy(raster_settings.projmatrix),
             'tanfovx':      np.float32(raster_settings.tanfovx),
             'tanfovy':      np.float32(raster_settings.tanfovy),
             'image_height': np.int64(raster_settings.image_height),
@@ -91,8 +98,10 @@ class _RasterizeGaussians(torch.autograd.Function):
             server.put_value(name, value)
 
         # call our all-inclusive grad function
-        output_vars = ['dmeans3d', 'dmeans2d', 'dcolors', 'dopacities', 'dscales', 'drotations', 'color', 'radii', 'loss']
-        server.cmd_call("grad", *output_vars, *inputs.keys())
+        output_vars = ['dmeans3d', 
+                     #  'dmeans2d', 
+                       'dcolors', 'dopacities', 'dscales', 'drotations', 'color', 'radii', 'loss']
+        server.cmd_call("grad2", *output_vars, *inputs.keys())
 
         # collect outputs
         outputs = {}
@@ -113,11 +122,28 @@ class _RasterizeGaussians(torch.autograd.Function):
         # save the derivatives for the "backward pass" (we really just did both passes)
         ctx.save_for_backward(
             to_torch(outputs['dmeans3d']), 
-            to_torch(outputs['dmeans2d']), 
+            #to_torch(outputs['dmeans2d']), 
+            to_torch(outputs['dmeans3d']), 
             to_torch(outputs['dcolors']), 
             to_torch(outputs['dopacities']), 
             to_torch(outputs['dscales']), 
             to_torch(outputs['drotations']))
+        
+        
+        # print('#################################################### FUTHARK #######################################################')
+        # grads = {
+        #     'dmeans3d': to_torch(outputs['dmeans3d']), 
+        #     'dmeans2d': to_torch(outputs['dmeans2d']), 
+        #     'dcolors' :to_torch(outputs['dcolors']), 
+        #     'dopacities':to_torch(outputs['dopacities']), 
+        #     'dscales':to_torch(outputs['dscales']), 
+        #     'drotations':to_torch(outputs['drotations'])
+        # }
+        # for name, grad in grads.items():
+        #     try:
+        #         print(name, grad[:5])
+        #     except:
+        #        pass
 
         return (torch.tensor(outputs['color'], device='cuda', dtype=torch.float32), 
                 torch.tensor(outputs['radii'], device='cuda', dtype=torch.int32), 
@@ -128,10 +154,12 @@ class _RasterizeGaussians(torch.autograd.Function):
     # passes in "forward", we are simply returning the results of that automatic backward
     # pass here
     @staticmethod
+    
     def backward(ctx, _, __, ___, ____):
 
         # Restore grads from context
         grad_means3D, grad_means2D, grad_colors_precomp, grad_opacities,grad_scales,grad_rotations = ctx.saved_tensors
+
 
         grads = (
             grad_means3D,

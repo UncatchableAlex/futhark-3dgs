@@ -1,8 +1,8 @@
 -- Transform Point 4x3
 -- ==
 -- entry: transform_point_4x3
--- input {[1.0f32, 2.0, 3.0] [[0.0f32, -1.0, 0.0, 0.0],[1.0f32,  0.0, 0.0, 0.0],[0.0f32, 0.0, 1.0, 0.0],[10.0f32, 20.0, 30.0, 1.0]]}
--- output {[8.0f32,21.0f32,33.0f32]}
+-- input {[1.0f64, 2.0, 3.0] [[0.0f64, -1.0, 0.0, 0.0],[1.0f64,  0.0, 0.0, 0.0],[0.0f64, 0.0, 1.0, 0.0],[10.0f64, 20.0, 30.0, 1.0]]}
+-- output {[8.0f64,21.0f64,33.0f64]}
 --
 --
 -- Binary Search
@@ -11,11 +11,11 @@
 -- input {[1,3,5,8,10,15,20,40,44], 39}
 -- output {6}
 
-def dot [n] (x: [n]f32) (y: [n]f32): f32 = 
+def dot [n] (x: [n]f64) (y: [n]f64): f64 = 
     reduce (+) 0 (map2 (*) x y)
 
 -- adapted from https://www.futhark-lang.org/examples/matrix-multiplication.html
-def matmul_f32 [n][m][p] (A: [n][m]f32) (B: [m][p]f32) : [n][p]f32 =
+def matmul_f64 [n][m][p] (A: [n][m]f64) (B: [m][p]f64) : [n][p]f64 =
   map (\A_row ->
          map (\B_col ->
                 reduce (+) 0 (map2 (*) A_row B_col))
@@ -23,14 +23,14 @@ def matmul_f32 [n][m][p] (A: [n][m]f32) (B: [m][p]f32) : [n][p]f32 =
       A
 
 
-def transform_point_4x3 (p: [3]f32) (T: [4][4]f32) : [3]f32 = 
+def transform_point_4x3 (p: [3]f64) (T: [4][4]f64) : [3]f64 = 
     [
         T[0][0]*p[0] + T[0][1]*p[1] + T[0][2]*p[2] + T[0][3],
         T[1][0]*p[0] + T[1][1]*p[1] + T[1][2]*p[2] + T[1][3],
         T[2][0]*p[0] + T[2][1]*p[1] + T[2][2]*p[2] + T[2][3]
     ]
 
-def transform_point_4x4  (p: [3]f32) (T: [4][4]f32) : [4]f32 = 
+def transform_point_4x4  (p: [3]f64) (T: [4][4]f64) : [4]f64 = 
     [
         T[0][0]*p[0] + T[0][1]*p[1] + T[0][2]*p[2] + T[0][3],
         T[1][0]*p[0] + T[1][1]*p[1] + T[1][2]*p[2] + T[1][3],
@@ -38,7 +38,7 @@ def transform_point_4x4  (p: [3]f32) (T: [4][4]f32) : [4]f32 =
         T[3][0]*p[0] + T[3][1]*p[1] + T[3][2]*p[2] + T[3][3]
     ]
 
-def matmul_3x3 (A: [3][3]f32) (B: [3][3]f32) : [3][3]f32 =
+def matmul_3x3 (A: [3][3]f64) (B: [3][3]f64) : [3][3]f64 =
     [
         [A[0][0]*B[0][0] + A[0][1]*B[1][0] + A[0][2]*B[2][0],
          A[0][0]*B[0][1] + A[0][1]*B[1][1] + A[0][2]*B[2][1],
@@ -56,7 +56,7 @@ def matmul_3x3 (A: [3][3]f32) (B: [3][3]f32) : [3][3]f32 =
 -- Transform a **UNIT** quaternion to a rotation matrix 
 -- https://en.wikipedia.org/wiki/Quaternions_and_spatial_rotation#Using_quaternions_as_rotations
 -- TODO: Figure out where we enforce that quaternions are unit
-def quat_to_mat (q: [4]f32) : [3][3]f32= 
+def quat_to_mat (q: [4]f64) : [3][3]f64= 
     let qr = q[0]
     let qi = q[1]
     let qj = q[2]
@@ -68,7 +68,7 @@ def quat_to_mat (q: [4]f32) : [3][3]f32=
     ]
 
 -- convert a scale vector to a scale matrix
-def scale_to_mat (s: [3]f32) : [3][3]f32 = 
+def scale_to_mat (s: [3]f64) : [3][3]f64 = 
     [
         [s[0],0,0],
         [0,s[1],0],
@@ -76,21 +76,17 @@ def scale_to_mat (s: [3]f32) : [3][3]f32 =
     ]
 
 -- convert a coordinate from normalized device coordinates (-1 to 1) to a pixel value
-def ndc_to_pix (v: f32) (s: i32) : f32 = 
-    ((v + 1.0) * (f32.i32 s) - 1) * 0.5
-
--- convert a coordinate from a pixel value to normalized device coordinates (-1 to 1)
-def pix_to_ndc (v: f32) (s: i32) : f32 =
-    (2.0 * v + 1.0) / (f32.i32 s) - 1.0
+def ndc_to_pix (v: f64) (s: i32) : f64 = 
+    ((v + 1.0) * (f64.i32 s) - 1) * 0.5
 
 
-def get_rect_2d (x:f32, y:f32) (radius: f32) (W: i32) (H: i32) (tilesize: i32): (i32,i32,i32,i32) =
+def get_rect_2d (x:f64, y:f64) (radius: f64) (W: i32) (H: i32) (tilesize: i32): (i32,i32,i32,i32) =
     let tiles_x = (W + tilesize - 1) / tilesize
     let tiles_y = (H + tilesize - 1) / tilesize
-    let xlo = i32.min tiles_x (i32.max 0 ((i32.f32 (x - radius))/tilesize))
-    let xhi = i32.min tiles_x (i32.max 0 ((i32.f32 (x + radius + f32.i32 tilesize - 1))/tilesize))
-    let ylo = i32.min tiles_y (i32.max 0 ((i32.f32 (y - radius))/tilesize))
-    let yhi = i32.min tiles_y (i32.max 0 ((i32.f32 (y + radius + f32.i32 tilesize - 1))/tilesize))
+    let xlo = i32.min tiles_x (i32.max 0 ((i32.f64 (x - radius))/tilesize))
+    let xhi = i32.min tiles_x (i32.max 0 ((i32.f64 (x + radius + f64.i32 tilesize - 1))/tilesize))
+    let ylo = i32.min tiles_y (i32.max 0 ((i32.f64 (y - radius))/tilesize))
+    let yhi = i32.min tiles_y (i32.max 0 ((i32.f64 (y + radius + f64.i32 tilesize - 1))/tilesize))
     in (ylo, yhi, xlo, xhi)
 
 
