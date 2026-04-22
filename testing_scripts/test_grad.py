@@ -7,6 +7,11 @@ import matplotlib.pyplot as plt
 
 # the whole point of this script is to test the accuracy of grad
 
+def cosine_similarity(a, b):
+    a_flat = a.flatten()
+    b_flat = b.flatten()
+    return np.dot(a_flat, b_flat) / (np.linalg.norm(a_flat) * np.linalg.norm(b_flat))
+
 # provide file paths to relevant files
 image_path = '/home/mjk711/gaussian-splatting/tandt/train/images/00124.jpg'
 rasterizer_inps = '../rasterizer_inps'
@@ -39,53 +44,72 @@ n = 200000
 
 # prep  inputs as numpy arrays with correct dtypes
 inputs = {
-    'bg':           np.array([0,0,0],                       dtype=np.float32),
-    'means3D':      np.array(inps['means3D'].tolist()[:n],     dtype=np.float32),
-    'colors':       np.array(inps['colors_precomp'].tolist()[:n], dtype=np.float32),
-    'opacities':    np.array(inps['opacities'].tolist()[:n],   dtype=np.float32),
-    'scales':       np.array(inps['scales'].tolist()[:n],      dtype=np.float32),
-    'rotations':    np.array(inps['rotations'].tolist()[:n],   dtype=np.float32),
-    'viewmatrix':   np.array(inps['viewmatrix'],               dtype=np.float32),
-    'projmatrix':   np.array(inps['projmatrix'],               dtype=np.float32),
-    'tanfovx':      np.float32(inps['tanfovx']),
-    'tanfovy':      np.float32(inps['tanfovy']),
+    'bg':           np.array([0,0,0],                       dtype=np.float64),
+    'means3D':      np.array(inps['means3D'].tolist()[:n],     dtype=np.float64),
+    'colors':       np.array(inps['colors_precomp'].tolist()[:n], dtype=np.float64),
+    'opacities':    np.array(inps['opacities'].tolist()[:n],   dtype=np.float64),
+    'scales':       np.array(inps['scales'].tolist()[:n],      dtype=np.float64),
+    'rotations':    np.array(inps['rotations'].tolist()[:n],   dtype=np.float64),
+    'viewmatrix':   np.array(inps['viewmatrix'],               dtype=np.float64),
+    'projmatrix':   np.array(inps['projmatrix'],               dtype=np.float64),
+    'tanfovx':      np.float64(inps['tanfovx']),
+    'tanfovy':      np.float64(inps['tanfovy']),
     'image_height': np.int64(inps['image_height']),
     'image_width':  np.int64(inps['image_width']),
     'ssim_kernel_size': np.int32(11),
-    'ssim_kernel_sigma': np.float32(1.5),
-    'gt_image': np.array(inps['means3D'].tolist()[:n],     dtype=np.float32),
-    'lambda' :      np.float32(0.2)}
+    'ssim_kernel_sigma': np.float64(1.5),
+    'gt_image': np.array(inps['means3D'].tolist()[:n],     dtype=np.float64),
+    'lambda' :      np.float64(0.2)}
 
 with futhark_server.Server(rasterizer_path) as server:
     # store each input as a named variable
     for name, value in inputs.items():
         server.put_value(name, value)
 
-    gt = np.array(plt.imread(image_path), dtype=np.float32)
+    gt = np.array(plt.imread(image_path), dtype=np.float64)
     server.cmd_free('gt_image')
     
     # normalize jpg values upon loading. we need rbg values in [0,1] but jpg has [0,255]
-    server.put_value('gt_image',np.array(gt/255, dtype=np.float32))
+    server.put_value('gt_image',np.array(gt/255, dtype=np.float64))
     output_vars = ['dmeans3d', 'dmeans2d', 'dcolors', 'dopacities', 'dscales', 'drotations', 'pix', 'radii', 'loss']
-
-    # warmup run
+    
+    # run
     server.cmd_call("grad", *output_vars, *inputs.keys())
 
-    dmeans3d = server.get_value('dmeans3d')
-    dmeans2d = server.get_value('dmeans2d')
-    dcolors = server.get_value('dcolors')
-    dscales = server.get_value('dscales')
-    drotations = server.get_value('drotations')
-    pix = server.get_value('pix')
+    outs1 = {}
 
     # how many samples we observe:
     m = 5
-    print('dmeans3d', dmeans3d[:m])
-    print('demans2d', dmeans2d[:m])
-    print('dcolors', dcolors[:m])
-    print('dscales', dscales[:m])
-    print('drotations', drotations[:m]) 
+    for var in output_vars:
+        outs1[var] = server.get_value(var)
+        server.cmd_free(var)
+      #  print(f'{var}: {outs1[var][:m]}')
 
-    plt.imshow(pix)
-    plt.axis("off")
-    plt.savefig(f'image.png', bbox_inches="tight", pad_inches=0)   
+    output_vars = ['dmeans3d', 'dcolors', 'dopacities', 'dscales', 'drotations', 'pix', 'radii', 'loss']
+    
+    # run
+    server.cmd_call("grad2", *output_vars, *inputs.keys())
+    
+    outs2 = {}
+    for var in output_vars:
+        outs2[var] = server.get_value(var)
+        server.cmd_free(var)
+
+    print("cosine similarity: dmeans3d ", cosine_similarity(outs1['dmeans3d'], outs2['dmeans3d']))
+    
+    print("magnitude dmeans3d grad: ", np.linalg.norm(outs1['dmeans3d'].flatten()))
+    print("magnitude dmeans3d grad2: ", np.linalg.norm(outs2['dmeans3d'].flatten()))
+
+    # print("cosine similarity: dmeans2d ", cosine_similarity(dmeans2d_1, dmeans2d_2))
+
+    # print("magnitude dmeans2d grad: ", np.linalg.norm(dmeans2d_1.flatten()))
+    # print("magnitude dmeans2d proj: ", np.linalg.norm(dmeans2d_2.flatten()))
+
+    
+    # print("cosine similarity: dcolors ", cosine_similarity(outs1['dcolors'], outs2['dcolors']))
+    # print("cosine similarity: dscales ", cosine_similarity(dscales_1, dscales_2))
+    # print("cosine similarity: drotations ", cosine_similarity(drotations_1, drotations_2))
+
+    # plt.imshow(pix_2)
+    # plt.axis("off")
+    # plt.savefig(f'image.png', bbox_inches="tight", pad_inches=0)   

@@ -3,10 +3,11 @@ import json
 import subprocess
 import futhark_server
 from tqdm import tqdm
+from futhark_3dgs.util import look_at
+from futhark_3dgs import Futhark_Rasterization_Server
 
 output_dir = './image_outputs'
 rasterizer_inps = '../rasterizer_inps'
-rasterizer_path = '../futhark_rasterizer/rasterizer'
 
 # the number of frames to render
 frames = 120
@@ -17,59 +18,6 @@ fps = 15
 
 # how many camera z-axes we are away from our target
 lambd = 1
-
-
-def view(yaw, pitch, roll, x, y, z):
-    Y = np.array([
-        [np.cos(yaw), -np.sin(yaw), 0],
-        [np.sin(yaw), np.cos(yaw), 0],
-        [0,0,1]])
-    P = np.array([
-        [np.cos(pitch), 0, np.sin(pitch)],
-        [0, 1, 0],
-        [-np.sin(pitch), 0, np.cos(pitch)]
-    ])
-    R = np.array([
-        [1,0,0],
-        [0, np.cos(roll), -np.sin(roll)],
-        [0, np.sin(roll), np.cos(roll)]
-    ])
-    rot = Y@P@R
-  #  print(rot@rot.T)
-    V = np.array([
-        [rot[0][0],rot[0][1],rot[0][2],x],
-        [rot[1][0],rot[1][1],rot[1][2],y],
-        [rot[2][0],rot[2][1],rot[2][2],z],
-        [0,0,0,1]
-    ])
-    return np.array(np.transpose(V),  dtype=np.float32)
-
-
-
-
-def look_at(eye, target, up=np.array([0,1,0.0])):
-    # which way is forward?
-    forward = target - eye 
-    forward /= np.linalg.norm(forward) # normalize
-
-    # the "right" vector is orthogonal to forward and up
-    right = np.cross(forward, up)
-    right /= np.linalg.norm(right) # normalize
-
-    # make sure that our up really is orthogonal to our other axes
-    up = np.cross(right, forward)
-
-    # use opengl style of -forward actually being forward
-    R = np.stack([right, up, -forward])
-    t = -R @ eye # this is the formula for translation
-
-    V = np.eye(4, dtype=np.float32)
-    V[:3,:3] = R # set the rotation part of the matrix
-    V[:3, 3] = t # set the translation part
-
-   # print(V.T)
-
-    return V.T
 
 # the rotation part of the view matrix we were given
 R = np.array([[ -0.9923,  0.0558,  0.1102 ],
@@ -142,7 +90,7 @@ inputs = {
 true_proj = inputs['projmatrices'] @ np.linalg.inv(inputs['viewmatrices'])
 
 
-with futhark_server.Server(rasterizer_path) as server:
+with Futhark_Rasterization_Server() as server:
 
     # store each input as a named variable
     for name, value in inputs.items():
@@ -228,20 +176,3 @@ with futhark_server.Server(rasterizer_path) as server:
     ffmpeg_proc.stdin.close()
     ffmpeg_proc.wait()
     pbar.close()
-            
-
-# The view matrix we were given:
-# [
-#     [-0.9923450350761414, 0.055815912783145905, 0.11016339063644409, 0.0], 
-#     [0.04036509618163109, 0.9896361827850342, -0.13780750334262848, 0.0], 
-#     [-0.1167135238647461, -0.1323058307170868, -0.9843135476112366, 0.0], 
-#     [0.8556888103485107, 0.09102020412683487, 3.413832426071167, 1.0]]
-
-# or transposed:
-# [[-0.99234504,  0.0403651 , -0.11671352,  0.85568881],
-#        [ 0.05581591,  0.98963618, -0.13230583,  0.0910202 ],
-#        [ 0.11016339, -0.1378075 , -0.98431355,  3.41383243],
-#        [ 0.        ,  0.        ,  0.        ,  1.        ]]
-
-
-#srun -p gpu --mem=32G --cpus-per-task=48 --time=00:01:00 /home/mjk711/.conda/envs/gaussian_splatting/bin/python main_server.py
