@@ -87,22 +87,28 @@ class _RasterizeGaussians(torch.autograd.Function):
             'tanfovx':      np.float32(raster_settings.tanfovx),
             'tanfovy':      np.float32(raster_settings.tanfovy),
             'image_height': np.int64(raster_settings.image_height),
-            'image_width':  np.int64(raster_settings.image_width),
-            'ssim_kernel_size': np.int32(11),
-            'ssim_kernel_sigma': np.float32(1.5),
-            'gt_image':     to_numpy(raster_settings.gt_image).transpose(1,2,0),
-            'lambda' :      np.float32(0.2)
+            'image_width':  np.int64(raster_settings.image_width)
         }
+        if raster_settings.gt_image != None:
+            inputs.update({
+                'ssim_kernel_size': np.int32(11),
+                'ssim_kernel_sigma': np.float32(1.5),
+                'gt_image':     to_numpy(raster_settings.gt_image).transpose(1,2,0),
+                'lambda' :      np.float32(0.2)
+            })
+
         # provide all inputs to the server
         for name, value in inputs.items():
             server.put_value(name, value)
 
         # call our all-inclusive grad function
-        output_vars = ['dmeans3d', 
-                     #  'dmeans2d', 
-                       'dcolors', 'dopacities', 'dscales', 'drotations', 'color', 'radii', 'loss']
-        server.cmd_call("grad2", *output_vars, *inputs.keys())
-
+        if raster_settings.gt_image != None:
+            output_vars = ['dmeans3d', 'dmeans2d', 'dcolors', 'dopacities', 'dscales', 'drotations', 'color', 'radii', 'loss']
+            server.cmd_call("grad", *output_vars, *inputs.keys())
+        else:
+            output_vars = ['radii','color']
+            server.cmd_call("rasterize", *output_vars, *inputs.keys())
+        
         # collect outputs
         outputs = {}
         for var in output_vars:
@@ -110,46 +116,32 @@ class _RasterizeGaussians(torch.autograd.Function):
         
         # free variables from the server (we will replace them with new values next time we call the rasterizer)
         server.cmd_free(*output_vars, *inputs.keys())
+       # server.cmd_clear()
         
         # they store the color in a weird way. we mimic
         outputs['color'] = np.transpose(outputs['color'], (2, 0, 1))
 
-        # they also have this mysterious third column in their 2d mean derivatives. we mimic:
-        #outputs['dmeans2d'] = np.hstack([outputs['dmeans2d'], np.zeros((outputs['dmeans2d'].shape[0], 1))])
-        
         invdepths = np.array([])
 
         # save the derivatives for the "backward pass" (we really just did both passes)
-        ctx.save_for_backward(
-            to_torch(outputs['dmeans3d']), 
-            #to_torch(outputs['dmeans2d']), 
-            to_torch(outputs['dmeans3d']), 
-            to_torch(outputs['dcolors']), 
-            to_torch(outputs['dopacities']), 
-            to_torch(outputs['dscales']), 
-            to_torch(outputs['drotations']))
-        
-        
-        # print('#################################################### FUTHARK #######################################################')
-        # grads = {
-        #     'dmeans3d': to_torch(outputs['dmeans3d']), 
-        #     'dmeans2d': to_torch(outputs['dmeans2d']), 
-        #     'dcolors' :to_torch(outputs['dcolors']), 
-        #     'dopacities':to_torch(outputs['dopacities']), 
-        #     'dscales':to_torch(outputs['dscales']), 
-        #     'drotations':to_torch(outputs['drotations'])
-        # }
-        # for name, grad in grads.items():
-        #     try:
-        #         print(name, grad[:5])
-        #     except:
-        #        pass
-
-        return (torch.tensor(outputs['color'], device='cuda', dtype=torch.float32), 
-                torch.tensor(outputs['radii'], device='cuda', dtype=torch.int32), 
-                invdepths,
-                torch.tensor(outputs['loss'], device='cuda', dtype=torch.float32))
-
+        if raster_settings.gt_image != None:
+            ctx.save_for_backward(
+                to_torch(outputs['dmeans3d']), 
+                to_torch(outputs['dmeans2d']), 
+                to_torch(outputs['dcolors']), 
+                to_torch(outputs['dopacities']), 
+                to_torch(outputs['dscales']), 
+                to_torch(outputs['drotations']))
+            
+            return (torch.tensor(outputs['color'], device='cuda', dtype=torch.float32), 
+                    torch.tensor(outputs['radii'], device='cuda', dtype=torch.int32), 
+                    invdepths,
+                    torch.tensor(outputs['loss'], device='cuda', dtype=torch.float32))
+        else:
+            return (torch.tensor(outputs['color'], device='cuda', dtype=torch.float32), 
+                    torch.tensor(outputs['radii'], device='cuda', dtype=torch.int32), 
+                    invdepths,
+                    -1)
     # this method is a bit weird. Because our futhark AD is fused, we've done both
     # passes in "forward", we are simply returning the results of that automatic backward
     # pass here
@@ -159,7 +151,6 @@ class _RasterizeGaussians(torch.autograd.Function):
 
         # Restore grads from context
         grad_means3D, grad_means2D, grad_colors_precomp, grad_opacities,grad_scales,grad_rotations = ctx.saved_tensors
-
 
         grads = (
             grad_means3D,

@@ -16,3 +16,6 @@ images
 *.egg-info
 test_outputs
 *.mp4
+outputs
+test.slurm
+test.fut

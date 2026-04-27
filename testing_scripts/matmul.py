@@ -18,25 +18,20 @@ x, y, z = mean_cam[0], mean_cam[1], mean_cam[2]
 dmean = np.array([-0.0107, -0.0076, -0.0107])
 dmean_cam = dmean @ view_matrix_no_translation
 
-# recover dL/d(mean_2d) — just scale by z
-# dL_dmean2d = np.array([
-#     z * dmean_cam[0],
-#     z * dmean_cam[1],
-# ])
-# print(dL_dmean2d)
-
 dL_dmean2d = np.array([4.13364429e-05, -6.30420738e-03])
 
-J = [
-    [0.915244, 0.000000, -0.915244],
-    [-0.064718, 1.294350, -0.064718]
-]
+print(dmean_cam, dL_dmean2d)
 
-dL_dm3d = dL_dmean2d@J
+# J = [
+#     [0.915244, 0.000000, -0.915244],
+#     [-0.064718, 1.294350, -0.064718]
+# ]
 
-target = np.array([-0.0107, -0.0076, -0.0107])
+# dL_dm3d = dL_dmean2d@J
 
-print(target/dL_dm3d)
-print(dL_dm3d/target)
+# target = np.array([-0.0107, -0.0076, -0.0107])
+
+# print(target/dL_dm3d)
+# print(dL_dm3d/target)
 
 

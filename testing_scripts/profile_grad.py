@@ -35,11 +35,13 @@ with open(f'{rasterizer_inps}/debug_rasterizer_settings.json', 'r') as f:
     inps.update(json_data)
 
 ns = [100, 1000, 5000, 10000, 20000, 30000, 40000, 50000,100000,150000]
-times = []
+batch_size = 30
+times = np.zeros((3,len(ns)))
+
 
 with futhark_server.Server(rasterizer_path) as server:
     gt = np.array(plt.imread(image_path), dtype=np.float32) / 255.0
-    for n in ns:
+    for i,n in enumerate(ns):
         inputs = {
             'bg':           np.array([0,0,0],                               dtype=np.float32),
             'means3D':      np.array(inps['means3D'].tolist()[:n],          dtype=np.float32),
@@ -63,22 +65,24 @@ with futhark_server.Server(rasterizer_path) as server:
             server.put_value(name, value)
 
         output_vars = ['dmeans3d', 'dmeans2d', 'dcolors', 'dopacities', 'dscales', 'drotations', 'pix', 'radii', 'loss']
+        print(f"n={n}")
+        # loop each of our grad functions
+        for j,f in enumerate(['grad', 'grad2', 'grad3']):
+            # warmup run
+            server.cmd_call(f, *output_vars, *inputs.keys())
+            server.cmd_free(*output_vars)
 
-        # warmup run
-        server.cmd_call("grad", *output_vars, *inputs.keys())
-        server.cmd_free(*output_vars)
+            # timed runs
+            start = time.perf_counter()
+            for _ in range(batch_size):
+                server.cmd_call(f, *output_vars, *inputs.keys())
+                server.cmd_free(*output_vars)
+            elapsed = time.perf_counter() - start
+            times[j][i] = elapsed/batch_size
+            print(f"f={f}: {elapsed:.4f}s")
 
-        # timed run
-        start = time.perf_counter()
-        server.cmd_call("grad", *output_vars, *inputs.keys())
-        elapsed = time.perf_counter() - start
-        times.append(elapsed)
-        print(f"n={n:>6}: {elapsed:.4f}s")
-
-        server.cmd_free(*output_vars, *inputs.keys())
+        server.cmd_free(*inputs.keys())
         server.cmd_clear()
 
-# summary
-print("\nn, time(s)")
-for n, t in zip(ns, times):
-    print(f"{n}, {t:.4f}")
+
+# srun --time=01:00:00 --partition=gpu --gres=gpu:1 --mem=8G --cpus-per-task=2 --pty bash
