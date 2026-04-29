@@ -3,6 +3,7 @@ import json
 import futhark_server
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from futhark_3dgs import Futhark_Rasterization_Server
 
 
 # the whole point of this script is to test the accuracy of grad
@@ -13,9 +14,8 @@ def cosine_similarity(a, b):
     return np.dot(a_flat, b_flat) / (np.linalg.norm(a_flat) * np.linalg.norm(b_flat))
 
 # provide file paths to relevant files
-image_path = '/home/mjk711/gaussian-splatting/tandt/train/images/00124.jpg'
+#image_path = '/home/mjk711/gaussian-splatting/tandt/train/images/00124.jpg'
 rasterizer_inps = '/home/mjk711/gaussian-splatting/submodules/futhark-3dgs/rasterizer_inps'
-rasterizer_path = '/home/mjk711/gaussian-splatting/submodules/futhark-3dgs/futhark_rasterizer/rasterizer'
 
 np_names = [
     'colors_precomp',
@@ -61,12 +61,12 @@ inputs = {
     'gt_image': np.array(inps['means3D'].tolist()[:n],     dtype=np.float32),
     'lambda' :      np.float32(0.2)}
 
-with futhark_server.Server(rasterizer_path) as server:
+with Futhark_Rasterization_Server() as server:
     # store each input as a named variable
     for name, value in inputs.items():
         server.put_value(name, value)
 
-    gt = np.array(plt.imread(image_path), dtype=np.float32)
+    gt = np.zeros((inps['image_height'], inps['image_width'],3)) #np.array(plt.imread(image_path), dtype=np.float32)
     server.cmd_free('gt_image')
     
     # normalize jpg values upon loading. we need rbg values in [0,1] but jpg has [0,255]
@@ -78,15 +78,10 @@ with futhark_server.Server(rasterizer_path) as server:
 
     outs1 = {}
 
-    # how many samples we observe:
-    m = 5
     for var in output_vars:
         outs1[var] = server.get_value(var)
-        server.cmd_free(var)
-      #  print(f'{var}: {outs1[var][:m]}')
-    
+        server.cmd_free(var)    
 
-    print(f'drotations1: {outs1["drotations"]}')
     # run
     server.cmd_call("grad2", *output_vars, *inputs.keys())
     
@@ -94,11 +89,6 @@ with futhark_server.Server(rasterizer_path) as server:
     for var in output_vars:
         outs2[var] = server.get_value(var)
         server.cmd_free(var)
-
-    print(f'drotations2: {outs1["drotations"]}')
-
-    # mags = np.apply_along_axis(np.linalg.norm, 1, outs1['dmeans3d'])
-    # print(outs1['dmeans3d'][mags > 0][:30])
 
     print("cosine similarity: dmeans3d ", cosine_similarity(outs1['dmeans3d'], outs2['dmeans3d']))
     
@@ -110,11 +100,9 @@ with futhark_server.Server(rasterizer_path) as server:
     print("magnitude dmeans2d grad: ", np.linalg.norm(outs1['dmeans2d'][:,:2].flatten()))
     print("magnitude dmeans2d grad2: ", np.linalg.norm(outs2['dmeans2d'][:,:2].flatten()))
 
-    
-    # print("cosine similarity: dcolors ", cosine_similarity(outs1['dcolors'], outs2['dcolors']))
-    # print("cosine similarity: dscales ", cosine_similarity(dscales_1, dscales_2))
-    # print("cosine similarity: drotations ", cosine_similarity(drotations_1, drotations_2))
-
+    for var in ['dcolors','dscales','drotations']:
+        print(f"cosine similarity: {var} ", cosine_similarity(outs1[var], outs2[var]))
+   
     # plt.imshow(pix_2)
     # plt.axis("off")
     # plt.savefig(f'image.png', bbox_inches="tight", pad_inches=0)   
