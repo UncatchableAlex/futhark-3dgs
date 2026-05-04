@@ -15,6 +15,7 @@ import "util"
 import "lib/github.com/diku-dk/sorts/radix_sort"
 
 let TILESIZE = 16i32
+let MAX_GAUSSIANS_PER_PIX = 8192i32
 
 -- check if a point is in the view frustum with a quick heuristic approximation
 def in_frustum (p: [3]f32) (view_matrix: [4][4]f32) (proj_matrix: [4][4]f32): bool = 
@@ -251,12 +252,20 @@ def pixel_color [n] [m]
         let end = binary_search sorted_keys ((u64.i64 (tile + 1)) << 32) id
 
         -- This whole for-loop is just equation 2 from the 3dgs paper (Kerbl et al. 2023)
-        let ((pr, pg, pb), bg_T, _) = loop ((r,g,b), T, i) = ((0.0f32, 0.0, 0.0), 1.0, start) while T > 0.0001 && i < end do
-            let mean_clip =  gs[sorted_indices[i]].mean_clip
+        let ((pr, pg, pb), bg_T) = 
+
+            --#[stripmine(128)]
+            loop ((r,g,b), T) = ((0.0f32, 0.0f32, 0.0f32), 1.0f32) for i < MAX_GAUSSIANS_PER_PIX do
+            let j = start + i
+            -- if our loop goes out of bounds, stop calculating
+            in if j >= end || T < 0.0001 then ((r,g,b), T) else
+
+            -- otherwise, keep calculating colors based on the intersecting gaussians
+            let mean_clip = gs[sorted_indices[j]].mean_clip
             let mean = (ndc_to_pix mean_clip.0 (i32.i64 W), ndc_to_pix mean_clip.1 (i32.i64 H))
-            let opacity = gs[sorted_indices[i]].opacity
-            let g_color = gs[sorted_indices[i]].color
-            let conic = gs[sorted_indices[i]].conic
+            let opacity = gs[sorted_indices[j]].opacity
+            let g_color = gs[sorted_indices[j]].color
+            let conic = gs[sorted_indices[j]].conic
             
             -- the distance of this pixel from the ith gaussian's mean
             let dx = f32.i64 pix_x - mean.0
@@ -265,14 +274,14 @@ def pixel_color [n] [m]
             -- gaussian equation. See eq 19 from Zwicker et al. 2001
             let power = -0.5 * (conic.0*dx*dx + 2*conic.1*dx*dy + conic.2*dy*dy)
             in 
-                if power > 0 
-                then ((r,g,b), T, i+1) else
+                if power > 0  -- numerical degenerate case something went wrong upstream, probably a near singular covariance matrix
+                then ((r,g,b), T) else
             let alpha = f32.min 0.99 (opacity * f32.exp power)
 
             -- We don't include gaussians with tiny alphas. This is to reduce numerical instability
             -- when differentiating. See 3DGS Kerbl et al. 2023 appendix
-            in if alpha < 1 / 255 
-                then ((r,g,b), T, i+1) 
+            in if alpha < (1f32 / 255f32) 
+                then ((r,g,b), T) 
                 else 
 
             let T' = T * (1 - alpha)  -- calculate new transmittance
@@ -282,7 +291,7 @@ def pixel_color [n] [m]
                 g_color[0] * alpha * T + r, 
                 g_color[1] * alpha * T + g, 
                 g_color[2] * alpha * T + b)
-            in if T' < 0.0001 then ((r,g,b), T', i+1) else (color', T', i+1)
+            in if T' < 0.0001 then ((r,g,b), T') else (color', T')
 
         -- add the color contribution of the background
         in [
@@ -295,7 +304,7 @@ def rasterize2dGaussians [n]
     (g2ds: [n]Gaussian2D)
     (background: [3]f32)
     (image_height: i64)
-    (image_width: i64) : ([n]i32, [image_height][image_width][3]f32) = 
+    (image_width: i64) : ([n]i32, [image_height][image_width][3]f32, i32) = 
 
         let H = i32.i64 image_height
         let W = i32.i64 image_width
@@ -326,9 +335,18 @@ def rasterize2dGaussians [n]
         -- define a function to find the color of a pixel
         let f = pixel_color image_width image_height sorted_gaussian_keys sorted_gaussian_indices background g2ds_culled
 
+        let tile_count = i64.i32 <| ((W + TILESIZE - 1) / TILESIZE) * ((H + TILESIZE - 1) / TILESIZE)
+        let maxg = i32.maximum <| map (\tile ->
+            -- the index of the first gaussian in the sorted list in the given tile
+            let start = binary_search sorted_gaussian_keys ((u64.i64 tile) << 32) id
+            -- the index of the last gaussian in the sorted list in the given tile
+            let end = binary_search sorted_gaussian_keys ((u64.i64 (tile + 1)) << 32) id
+            in end - start
+        ) (iota tile_count)
+
         -- tabulate on each pixel using our function
         let pixels = tabulate_2d (i64.i32 H) (i64.i32 W) (\y x -> f x y) :> [image_height][image_width][3]f32
-        in (radii, pixels)
+        in (radii, pixels, maxg)
 
 
 def compute2dGaussians [n]
@@ -390,7 +408,7 @@ entry rasterize [n]
   --  (campos: [3]f32) -- unused
    -- (prefiltered: bool) -- unused
    -- (debug: bool) --unused
-    : ([n]i32, [image_height][image_width][3]f32) =
+    : ([n]i32, [image_height][image_width][3]f32, i32) =
         let H = i32.i64 image_height
         let W = i32.i64 image_width
         let gaussians = compute2dGaussians means3D colors opacities scales rotations view_matrix proj_matrix tan_fovx tan_fovy H W
@@ -428,13 +446,12 @@ def ssim3 [n] [m] [o]
         let x' = x - (n/2)
         let y' = y - (n/2)
         let nn = n*n
-        let (_, (muX, muY, muXY, muX2, muY2))= loop (j,(muX, muY, muXY, muX2, muY2)) = (0, (0, 0, 0, 0, 0)) while j < nn do
+        let (muX, muY, muXY, muX2, muY2)= loop (muX, muY, muXY, muX2, muY2) = (0, 0, 0, 0, 0) for j < nn do
             let a = x' + (j/n)
             let b = y' + (j%n)
             let k = A[j/n][j%n]
             let inbounds = a >= 0 && b >= 0 && a < m && b < o
             in (
-                j+1, 
                 if inbounds 
                     then 
                         (k*X[a][b][i] + muX, 
@@ -508,7 +525,7 @@ entry grad [n]
     (ssim_kernel_sigma: f32)
     (gt_image: [image_height][image_width][3]f32) 
     (lambda: f32) -- percentage of our loss that is dssim (the rest is L1)
-       : ([n][3]f32, [n][3]f32, [n][3]f32, [n][1]f32, [n][3]f32, [n][4]f32, [image_height][image_width][3]f32, [n]i32, f32) = 
+       : ([n][3]f32, [n][3]f32, [n][3]f32, [n][1]f32, [n][3]f32, [n][4]f32, [image_height][image_width][3]f32, [n]i32, f32, i32) = 
         let H = i32.i64 image_height
         let W = i32.i64 image_width
 
@@ -577,17 +594,17 @@ entry grad [n]
                 let gaussians' = map3 (\(g: Gaussian2D) m c -> (g with mean_clip = m) with conic=c) gaussians means2D_clips conics
 
                 -- rasterize the gaussians
-                let (radii, pix) = rasterize2dGaussians gaussians' background image_height image_width
+                let (radii, pix, maxg) = rasterize2dGaussians gaussians' background image_height image_width
 
                 -- calculate the loss and return
                 let l = loss image_height image_width ssim_kernel_size ssim_kernel_sigma pix gt_image lambda
-                in (l, radii, pix))
+                in (l, radii, pix, maxg))
 
         -- inputs to our forward pass
         let inps = (means2D_clips, conic_2d, colors, opacities, scales, rotations)
 
         -- perform a full forward and backward pass on our loss calculation
-        let ((loss', radii, pix), (dmeans2D, dconics, dcolors, dopacities, _, _)) = vjp2 forward inps (1.0, rep 0, rep (rep [0,0,0]))
+        let ((loss', radii, pix, maxg), (dmeans2D, dconics, dcolors, dopacities, _, _)) = vjp2 forward inps (1.0, rep 0, rep (rep [0,0,0]), 0)
 
         -- use the chain rule to calculate dL/dm_3 = (dL/dm_2 x dm2/dm3) + (dL/dC x dC/dm3)
         let dmeans3D = map (\(i: i64) -> [
@@ -604,7 +621,7 @@ entry grad [n]
         -- calculate dL/dS = dL/dC x dC/dR
         let drotations = map2 transform_tup_4x3 dconics dC_R
 
-        in (dmeans3D, dmeans2D', dcolors, dopacities, dscales, drotations, pix, radii, loss')
+        in (dmeans3D, dmeans2D', dcolors, dopacities, dscales, drotations, pix, radii, loss', maxg)
 
 
 -- a version of grad that only does a single vjp to get every gradient except dL/dm2d.
@@ -638,7 +655,7 @@ entry grad2 [n]
                     proj_matrix tan_fovx tan_fovy H W
 
                 -- rasterize the gaussians
-                let (radii, pix) = rasterize2dGaussians gaussians background image_height image_width
+                let (radii, pix, _) = rasterize2dGaussians gaussians background image_height image_width
 
                 -- calculate the loss and return
                 let l = loss image_height image_width ssim_kernel_size ssim_kernel_sigma pix gt_image lambda
@@ -699,7 +716,7 @@ entry grad3 [n]
         -- define a forward pass to get the loss
         let forward =  
             \(means3D, colors, opacities, scales, rotations) -> (
-                let (radii, pix) = rasterize background means3D colors opacities scales rotations view_matrix proj_matrix tan_fovx tan_fovy image_height image_width              
+                let (radii, pix, _) = rasterize background means3D colors opacities scales rotations view_matrix proj_matrix tan_fovx tan_fovy image_height image_width              
                 let l = loss image_height image_width ssim_kernel_size ssim_kernel_sigma pix gt_image lambda
                 in (l, radii, pix))
 
@@ -714,7 +731,7 @@ entry grad3 [n]
                 let gaussians' = map2 (\(g: Gaussian2D) m -> g with mean_clip = m) gaussians means2D
 
                 -- rasterize the gaussians
-                let (_, pix) = rasterize2dGaussians gaussians' background image_height image_width
+                let (_, pix, _) = rasterize2dGaussians gaussians' background image_height image_width
 
                 -- calculate the loss and return
                 in loss image_height image_width ssim_kernel_size ssim_kernel_sigma pix gt_image lambda)
