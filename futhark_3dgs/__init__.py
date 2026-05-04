@@ -103,45 +103,41 @@ class _RasterizeGaussians(torch.autograd.Function):
 
         # call our all-inclusive grad function
         if raster_settings.gt_image != None:
-            output_vars = ['dmeans3d', 'dmeans2d', 'dcolors', 'dopacities', 'dscales', 'drotations', 'color', 'radii', 'loss']
-            server.cmd_call("grad", *output_vars, *inputs.keys())
+            server.cmd_call("grad", "grad_out", *inputs.keys())
+            dmeans3d, dmeans2d, dcolors, dopacities, dscales, drotations, color, radii, l, maxg = server.get_value('grad_out')
+            print(maxg)
         else:
-            output_vars = ['radii','color']
-            server.cmd_call("rasterize", *output_vars, *inputs.keys())
-        
-        # collect outputs
-        outputs = {}
-        for var in output_vars:
-            outputs[var] = server.get_value(var)
+            server.cmd_call("rasterize", "grad_out", *inputs.keys())
+            radii, color = server.get_value("grad_out")
         
         # free variables from the server (we will replace them with new values next time we call the rasterizer)
-        server.cmd_free(*output_vars, *inputs.keys())
-       # server.cmd_clear()
+        server.cmd_free(*inputs.keys())
+        server.cmd_free("grad_out")
+        server.cmd_clear() # we need this line here, otherwise we get a memory leak and eventually an OOM
         
         # they store the color in a weird way. we mimic
-        outputs['color'] = np.transpose(outputs['color'], (2, 0, 1))
+        color = np.transpose(color, (2, 0, 1))
 
         invdepths = np.array([])
+        loss = -1
 
         # save the derivatives for the "backward pass" (we really just did both passes)
         if raster_settings.gt_image != None:
             ctx.save_for_backward(
-                to_torch(outputs['dmeans3d']), 
-                to_torch(outputs['dmeans2d']), 
-                to_torch(outputs['dcolors']), 
-                to_torch(outputs['dopacities']), 
-                to_torch(outputs['dscales']), 
-                to_torch(outputs['drotations']))
+                to_torch(dmeans3d), 
+                to_torch(dmeans2d), 
+                to_torch(dcolors), 
+                to_torch(dopacities), 
+                to_torch(dscales), 
+                to_torch(drotations))
+            loss = torch.tensor(l, device='cuda', dtype=torch.float32)
             
-            return (torch.tensor(outputs['color'], device='cuda', dtype=torch.float32), 
-                    torch.tensor(outputs['radii'], device='cuda', dtype=torch.int32), 
-                    invdepths,
-                    torch.tensor(outputs['loss'], device='cuda', dtype=torch.float32))
-        else:
-            return (torch.tensor(outputs['color'], device='cuda', dtype=torch.float32), 
-                    torch.tensor(outputs['radii'], device='cuda', dtype=torch.int32), 
-                    invdepths,
-                    -1)
+        return (torch.tensor(color, device='cuda', dtype=torch.float32), 
+                torch.tensor(radii, device='cuda', dtype=torch.int32), 
+                invdepths,
+                loss)
+    
+        
     # this method is a bit weird. Because our futhark AD is fused, we've done both
     # passes in "forward", we are simply returning the results of that automatic backward
     # pass here

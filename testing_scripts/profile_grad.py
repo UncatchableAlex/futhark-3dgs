@@ -34,7 +34,7 @@ with open(f'{rasterizer_inps}/debug_rasterizer_settings.json', 'r') as f:
     json_data = json.load(f)
     inps.update(json_data)
 
-ns = [100, 1000, 5000, 10000, 20000, 30000, 40000, 50000,100000,150000]
+ns = [20000, 30000, 40000, 50000,100000,150000]
 batch_size = 30
 times = np.zeros((3,len(ns)))
 
@@ -64,19 +64,19 @@ with futhark_server.Server(rasterizer_path) as server:
         for name, value in inputs.items():
             server.put_value(name, value)
 
-        output_vars = ['dmeans3d', 'dmeans2d', 'dcolors', 'dopacities', 'dscales', 'drotations', 'pix', 'radii', 'loss']
+        #output_vars = ['dmeans3d', 'dmeans2d', 'dcolors', 'dopacities', 'dscales', 'drotations', 'pix', 'radii', 'loss']
         print(f"n={n}")
         # loop each of our grad functions
         for j,f in enumerate(['grad', 'grad2', 'grad3']):
             # warmup run
-            server.cmd_call(f, *output_vars, *inputs.keys())
-            server.cmd_free(*output_vars)
+            server.cmd_call(f, 'out', *inputs.keys())
+            server.cmd_free('out')
 
             # timed runs
             start = time.perf_counter()
             for _ in range(batch_size):
-                server.cmd_call(f, *output_vars, *inputs.keys())
-                server.cmd_free(*output_vars)
+                server.cmd_call(f, 'out', *inputs.keys())
+                server.cmd_free('out')
             elapsed = time.perf_counter() - start
             times[j][i] = elapsed/batch_size
             print(f"f={f}: {elapsed:.4f}s")
