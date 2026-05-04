@@ -104,8 +104,8 @@ class _RasterizeGaussians(torch.autograd.Function):
         # call our all-inclusive grad function
         if raster_settings.gt_image != None:
             server.cmd_call("grad", "grad_out", *inputs.keys())
-            dmeans3d, dmeans2d, dcolors, dopacities, dscales, drotations, color, radii, l, maxg = server.get_value('grad_out')
-            print(maxg)
+            dmeans3d, dmeans2d, dcolors, dopacities, dscales, drotations, color, radii, l, maxg, times_looped = server.get_value('grad_out')
+            print(maxg, times_looped)
         else:
             server.cmd_call("rasterize", "grad_out", *inputs.keys())
             radii, color = server.get_value("grad_out")
