@@ -335,14 +335,15 @@ def rasterize2dGaussians [n]
         -- define a function to find the color of a pixel
         let f = pixel_color image_width image_height sorted_gaussian_keys sorted_gaussian_indices background g2ds_culled
 
-        let tile_count = i64.i32 <| ((W + TILESIZE - 1) / TILESIZE) * ((H + TILESIZE - 1) / TILESIZE)
-        let maxg = i32.maximum <| map (\tile ->
-            -- the index of the first gaussian in the sorted list in the given tile
-            let start = binary_search sorted_gaussian_keys ((u64.i64 tile) << 32) id
-            -- the index of the last gaussian in the sorted list in the given tile
-            let end = binary_search sorted_gaussian_keys ((u64.i64 (tile + 1)) << 32) id
-            in end - start
-        ) (iota tile_count)
+        -- let tile_count = i64.i32 <| ((W + TILESIZE - 1) / TILESIZE) * ((H + TILESIZE - 1) / TILESIZE)
+        -- let maxg = i32.maximum <| map (\tile ->
+        --     -- the index of the first gaussian in the sorted list in the given tile
+        --     let start = binary_search sorted_gaussian_keys ((u64.i64 tile) << 32) id
+        --     -- the index of the last gaussian in the sorted list in the given tile
+        --     let end = binary_search sorted_gaussian_keys ((u64.i64 (tile + 1)) << 32) id
+        --     in end - start
+        -- ) (iota tile_count)
+        let maxg = 0
 
         -- tabulate on each pixel using our function
         let pixels = tabulate_2d (i64.i32 H) (i64.i32 W) (\y x -> f x y) :> [image_height][image_width][3]f32
@@ -371,18 +372,6 @@ def compute2dGaussians [n]
             (\mean scale rotation opacity color -> 
                 preprocess mean scale rotation view_matrix' proj_matrix' W H focalx focaly tan_fovx tan_fovy opacity[0] color)
             means3D scales rotations opacities colors
-        -- map5 (\mean _ _ opacity color ->
-        --      {
-        --     opacity=opacity[0],
-        --     color=color,
-        --     mean_clip=(mean[0]/mean[2], mean[1]/mean[2]) ,
-        --     conic=(1f32,2f32,3f32),
-        --     depth=10f32, 
-        --     tiles_touching=25i32, 
-        --     bounding_box=(10i32,15i32,10i32,15i32),
-        --     radius=50i32,
-        --     valid=true
-        --     }) means3D scales rotations opacities colors
 
 
 -- Our exposed rasterize function. In this function, we take the means, scales, 
