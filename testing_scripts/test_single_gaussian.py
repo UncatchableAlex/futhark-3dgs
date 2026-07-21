@@ -19,11 +19,14 @@ def finite_difference(server, inputs, f, test_var, output_vars):
     for name, value in inputs.items():
         server.put_value(name, value)
 
-    server.cmd_call(f, *output_vars, *inputs.keys())
-    ad_grad_2 = server.get_value('d' + test_var)[0]
+    server.cmd_call(f, 'out', *inputs.keys())
+    out = {}
+    for k,v in zip(output_vars, server.get_value('out')):
+        out[k] = v
+    
+    ad_grad_2 = out['d' + test_var][0]
     # clear the output
-    for var in output_vars:
-        server.cmd_free(var)
+    server.cmd_free('out')
     
     # we will track the finite difference loss gradient w.r.t. test_var using 10 different finite differences:
     finite_differences = []
@@ -38,22 +41,31 @@ def finite_difference(server, inputs, f, test_var, output_vars):
 
             # perterb in the positive direction
             server.put_value(test_var, inputs[test_var] + x_vec)
-            server.cmd_call(f, *output_vars, *inputs.keys())
-            perturbed_loss_pos = server.get_value('loss')
+
+
+            server.cmd_call(f, 'out', *inputs.keys())
+            out = {}
+            for k,v in zip(output_vars, server.get_value('out')):
+                out[k] = v
+
+            perturbed_loss_pos = out['loss']
             # clear the output
-            for var in output_vars:
-                server.cmd_free(var)
+            server.cmd_free('out')
 
             # free the test_variable
             server.cmd_free(test_var)
 
             # perterb in the negative direction
             server.put_value(test_var, inputs[test_var] - x_vec)
-            server.cmd_call(f, *output_vars, *inputs.keys())
-            perturbed_loss_neg = server.get_value('loss')
+
+            server.cmd_call(f, 'out', *inputs.keys())
+            out = {}
+            for k,v in zip(output_vars, server.get_value('out')):
+                out[k] = v
+            perturbed_loss_neg = out['loss']
+
             # clear the output
-            for var in output_vars:
-                server.cmd_free(var)
+            server.cmd_free('out')
 
             # track the finite difference derivative
             finite_difference.append((perturbed_loss_pos - perturbed_loss_neg) / (2*x))
@@ -72,16 +84,12 @@ fovy = 1 #0.8753571332164317
 cam_pos = np.array([1,0,1.0], dtype=np.float32)
 target = np.array([0,0,0.0], dtype=np.float32)
 view_matrix = np.array(look_at(cam_pos, target), dtype= np.float32).T
-proj_matrix = getProjectionMatrix(0.01, 100, fovx, fovy).T
-#fused_proj = np.array(proj_matrix @ view_matrix, dtype=np.float32) # this may have to go the other way around
-fused_proj = np.array(view_matrix @ proj_matrix, dtype=np.float32) # this may have to go the other way around
 
 # just test to make sure that our gaussian is on screen
 mean3d = [0,-0.1,0,1]
-hom = fused_proj.T @ np.array(mean3d)
-ndc = hom / (hom[3] + 1e-7)
-pix = ((ndc+1) * 200 - 1) * 0.5   
-print(pix)
+cam = view_matrix.T @ np.array(mean3d)
+pix = 100 + (cam / cam[2])
+
 
 # gt = np.zeros(shape=(200,200,3), dtype=np.float32)
 # gt[:,:] = [1,0,0] # set to all blue pixels
@@ -92,12 +100,12 @@ gt = np.asarray(Image.open('/home/mjk711/gaussian-splatting/submodules/futhark-3
 inputs = {
     'bg':           np.array([0,0,0],                       dtype=np.float32),
     'means3d':      np.array([mean3d[:3]],                  dtype=np.float32),
-    'colors':       np.array([[1,0,0]],                     dtype=np.float32),
+    'colors':       np.array([[0,1,0]],                     dtype=np.float32),
     'opacities':    np.array([[1]],                         dtype=np.float32),
     'scales':       np.array([[0.1,0.5,0.1]],               dtype=np.float32),
     'rotations':    np.array([[0.0,0.0,0.1,0.8]],                   dtype=np.float32),
     'viewmatrix':   view_matrix,
-    'projmatrix':   fused_proj,
+  #  'projmatrix':   fused_proj,
     'tanfovx':      np.float32(np.tan(fovx*0.5)),
     'tanfovy':      np.float32(np.tan(fovy*0.5)),
     'image_height' : np.int64(200),
@@ -139,7 +147,7 @@ inputs = {
 
 with Futhark_Rasterization_Server() as server:
 
-    for f in ['grad1', 'grad2', 'grad3']:
+    for f in ['grad', 'grad2', 'grad3']:
         print(f'##########################################  {f}  #############################################')
         t = PrettyTable()
         t.field_names = [
@@ -149,7 +157,7 @@ with Futhark_Rasterization_Server() as server:
             'z-score']
         
         for var in ['means3d', 'colors', 'opacities', 'scales', 'rotations']:
-            (ad, fd, sig, zscore) = finite_difference(server, inputs, 'grad2', var, output_vars_1)
+            (ad, fd, sig, zscore) = finite_difference(server, inputs, f, var, output_vars_1)
 
             t.add_row([
                 var, 
@@ -162,12 +170,13 @@ with Futhark_Rasterization_Server() as server:
     for name, value in inputs.items():
         server.put_value(name, value)
         
-    server.cmd_call("grad", *output_vars_1, *inputs.keys())
+    server.cmd_call("grad", 'out', *inputs.keys())
     outs1 = {}
-    for var in output_vars_1:
-        outs1[var] = server.get_value(var)
-        server.cmd_free(var)
-        if np.array([outs1[var]]).flatten().shape[0] < 100:
-            print(f'{var}: {outs1[var]}')
+    for k,v in zip(output_vars_1, server.get_value('out')):
+        outs1[k] = v
+        if np.array([outs1[k]]).flatten().shape[0] < 100:
+            print(f'{k}: {outs1[k]}')
+
+    server.cmd_free('out')
 
     plt.imsave("output.png", outs1['pix'])

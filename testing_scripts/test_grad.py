@@ -51,7 +51,7 @@ inputs = {
     'scales':       np.array(inps['scales'].tolist()[:n],      dtype=np.float32),
     'rotations':    np.array(inps['rotations'].tolist()[:n],   dtype=np.float32),
     'viewmatrix':   np.array(inps['viewmatrix'],               dtype=np.float32),
-    'projmatrix':   np.array(inps['projmatrix'],               dtype=np.float32),
+   # 'projmatrix':   np.array(inps['projmatrix'],               dtype=np.float32),
     'tanfovx':      np.float32(inps['tanfovx']),
     'tanfovy':      np.float32(inps['tanfovy']),
     'image_height': np.int64(inps['image_height']),
@@ -74,21 +74,24 @@ with Futhark_Rasterization_Server() as server:
     output_vars = ['dmeans3d', 'dmeans2d', 'dcolors', 'dopacities', 'dscales', 'drotations', 'pix', 'radii', 'loss']
     
     # run
-    server.cmd_call("grad", *output_vars, *inputs.keys())
+    server.cmd_call("grad", 'out', *inputs.keys())
 
     outs1 = {}
 
-    for var in output_vars:
-        outs1[var] = server.get_value(var)
-        server.cmd_free(var)    
+    for k,v in zip(output_vars, server.get_value('out')):
+        outs1[k] = v
+    
+    server.cmd_free('out')    
 
     # run
-    server.cmd_call("grad2", *output_vars, *inputs.keys())
+    server.cmd_call("grad2", 'out', *inputs.keys())
     
     outs2 = {}
-    for var in output_vars:
-        outs2[var] = server.get_value(var)
-        server.cmd_free(var)
+    for k,v in zip(output_vars, server.get_value('out')):
+        outs2[k] = v
+
+    server.cmd_free('out')    
+
 
     print("cosine similarity: dmeans3d ", cosine_similarity(outs1['dmeans3d'], outs2['dmeans3d']))
     

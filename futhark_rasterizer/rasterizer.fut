@@ -17,23 +17,10 @@ import "lib/github.com/diku-dk/sorts/radix_sort"
 let TILESIZE = 16i32
 let MAX_GAUSSIANS_PER_PIX = 8192i32
 
--- check if a point is in the view frustum with a quick heuristic approximation
-def in_frustum (p: [3]f32) (view_matrix: [4][4]f32) (proj_matrix: [4][4]f32): bool = 
-        -- bring the point into camera space 
-    let pc = transform_point_4x3 p view_matrix  
-    let p_hom = transform_point_4x4 p proj_matrix
-    let p_w = 1 / (p_hom[3] + 0.0000001) -- prevent divide-by-zeros 
-    let p_projx = p_hom[0]*p_w
-    let p_projy = p_hom[1]*p_w
-        -- check that the point isn't too close to the camera in the z-axis. 
-        -- Remember that the z-axis points in the same direction as the camera
-    in pc[2] > 0.2 && p_projx > -1.3 && p_projx < 1.3 && p_projy > -1.3 && p_projy < 1.3
-
-
 type Gaussian2D = {
     opacity:f32,
     color:[3]f32,
-    mean_clip: (f32, f32),
+    mean: (f32, f32),
     conic:(f32,f32,f32),
     depth:f32,
     tiles_touching:i32,
@@ -64,22 +51,22 @@ def compute_cov_2D
     (tan_fovx: f32) 
     (tan_fovy: f32) 
     (cov3D: [6]f32) 
-    (viewmatrix: [4][4]f32) : [3]f32 = 
+    (viewmatrix: [4][4]f32) : (f32, f32, f32) = 
 
     -- FOV magic from kerbl et al. 2023 (??)
     let t = transform_point_4x3 mean viewmatrix
     let limx = 1.3 * tan_fovx
     let limy = 1.3 * tan_fovy
-    let txtz = t[0] / t[2]
-    let tytz = t[1] / t[2]
-    let M0 =  t[2] * f32.min limx (f32.max (-limx) txtz)
-    let M1 =  t[2] * f32.min limy (f32.max (-limy) tytz)
-    let t2 =  t[2]
+    let txtz = t.0 / t.2
+    let tytz = t.1 / t.2
+    let M0 =  t.2 * f32.min limx (f32.max (-limx) txtz)
+    let M1 =  t.2 * f32.min limy (f32.max (-limy) tytz)
+    let t2 =  t.2
 
     -- equation 29 zwicker et al.
     let J =  [
-        [focal_x / t[2], 0, -(focal_x*M0) / (t2*t2)],
-        [0, focal_y/t[2], -(focal_y*M1)/(t2*t2)],
+        [focal_x / t2, 0, -(focal_x*M0) / (t2*t2)],
+        [0, focal_y/t2, -(focal_y*M1)/(t2*t2)],
         [0,0,0] -- we don't need this row because we will truncate to a 2x2 in a future step
     ]
 
@@ -104,7 +91,7 @@ def compute_cov_2D
 
     -- low pass filter (equation 33 zwicker et al.)
     -- we drop the 3rd row and column and return the top half of the symmetrical 2x2 cov mat
-    in [cov[0][0] + 0.3, cov[0][1], cov[1][1] + 0.3]
+    in (cov[0][0] + 0.3, cov[0][1], cov[1][1] + 0.3)
 
 
 -- preprocess each gaussian by determining which tiles it touches, the size of its largest radius
@@ -123,20 +110,36 @@ def preprocess
     --(cov3D_precomp: [][3][3]f32) -- if python were giving us the 3d covariance matrices
     --(colors_precomp: [3]f32)
     (viewmatrix: [4][4]f32)
-    (projmatrix: [4][4]f32)
+    --(projmatrix: [4][4]f32)
     --(cam_pos: [3]f32)
     (W: i32) (H: i32)
     (focal_x: f32) (focal_y: f32)
     (tan_fovx: f32) (tan_fovy: f32)
     (opacity: f32) (color: [3]f32) : Gaussian2D =
 
-        -- immediately return an empty value if the gaussian is not in view
-        let in_view = in_frustum mean viewmatrix projmatrix
+        -- convert world space coordinates to camera space coordinates
+        let cmean = transform_point_4x3 mean viewmatrix
+
+        -- get the pixel of the gaussian's mean in screen space
+        let pix = 
+            (
+                (f32.i32 W/2) + focal_x * cmean.0/cmean.2, -- pix x
+                (f32.i32 H/2) + focal_y * cmean.1/cmean.2  -- pix y
+            )
+
+        let depth:f32 = cmean.2 -- keep depth info separate
+
+        -- determine if this gaussian is in view
+        let margin_x = 0.15 * f32.i32 W
+        let margin_y = 0.15 * f32.i32 H
+        let in_view = depth > 0.2
+        && pix.0 > -margin_x && pix.0 < f32.i32 W + margin_x
+        && pix.1 > -margin_y && pix.1 < f32.i32 H + margin_y
 
         let badG: Gaussian2D = {
             opacity=opacity,
             color=color,
-            mean_clip=(0,0),
+            mean=(0,0),
             conic=(0,0,0),
             depth=0, 
             tiles_touching=0, 
@@ -146,15 +149,10 @@ def preprocess
             }
             -- if the gaussian isn't in the view frustum, return a badGaussian so it doesn't contribute to the rasterization
         in if not in_view then badG else
-        -- the homogeneous coordinates of the gaussian's mean
-        let p_hom = transform_point_4x4 mean projmatrix
-        let p_w = 1 / (p_hom[3] + 1e-7) -- avoid divide by 0
 
-        -- the gassian mean in clip space
-        let p_proj = [p_hom[0]*p_w, p_hom[1]*p_w, p_hom[2]*p_w]
         let cov3D = compute_cov_3D scales rotations
         let cov = compute_cov_2D mean focal_x focal_y tan_fovx tan_fovy cov3D viewmatrix
-        let det = cov[0] * cov[2] - cov[1] * cov[1]
+        let det = cov.0 * cov.2 - cov.1 * cov.1
         -- if the matrix is singular, return with an invalid gaussian so it doesn't contribute to the rasterization
         in if det == 0 then badG 
         else
@@ -163,7 +161,7 @@ def preprocess
 
         -- take the invserse of the 2d covariance matrix
         -- https://en.wikipedia.org/wiki/Invertible_matrix#Methods_of_matrix_inversion
-        let conic: (f32,f32,f32) = (cov[2]*det_inv, -cov[1]*det_inv, cov[0]*det_inv)
+        let conic: (f32,f32,f32) = (cov.2*det_inv, -cov.1*det_inv, cov.0*det_inv)
 
 
         -- find the range occupied by the gaussian in screen space. We use 
@@ -174,7 +172,7 @@ def preprocess
         -- remember: the eigenvalues of gaussians represent the variances along their principle
         -- axis. Basically how streched they are along their axes (their eigenvectors).
         -- There's a trick for calculating eigenvalues: https://www.johndcook.com/blog/2021/05/07/trick-for-2x2-eigenvalues/
-        let mid = 0.5 * (cov[0] + cov[2])
+        let mid = 0.5 * (cov.0 + cov.2)
         let inner = mid * mid - det
         let lambda1 = mid + f32.sqrt (f32.max 0.1 inner)
         let lambda2 = mid - f32.sqrt (f32.max 0.1 inner)
@@ -183,10 +181,6 @@ def preprocess
         -- get the radius of 3 standard deviations using the larger principle axis
         let std3 = f32.ceil <| 3 * (f32.sqrt larger_principle_axis)
 
-        -- convert homogeneous coordinates to pixel coordinates
-        let pix = (ndc_to_pix p_proj[0] W, ndc_to_pix p_proj[1] H)
-        let depth:f32 = p_proj[2] -- keep depth info separate
-
         -- calculate a bounding box for the support of our gaussian in pixel space. Define the box with 3 std deviations from the mean
         -- in the most stretched direction (either lambda1 or lambda2) 
         let (ylo,yhi,xlo,xhi): (i32,i32,i32,i32) = get_rect_2d pix std3 W H TILESIZE
@@ -194,7 +188,7 @@ def preprocess
         in if num_tiles == 0 then badG else {
                 opacity=opacity,
                 color=color,
-                mean_clip=(p_proj[0], p_proj[1]),
+                mean=pix,
                 conic=conic,
                 depth=depth, 
                 tiles_touching=num_tiles, 
@@ -233,7 +227,6 @@ def generateElem [n]
 -- Calculate the color of each pixel using a constant number of gaussians per pixel
 def pixel_color_train [n] [m]
     (W: i64)
-    (H: i64)
     (sorted_keys: [m]u64) 
     (sorted_indices: [m]i32)
     (bg: [3]f32)
@@ -261,8 +254,7 @@ def pixel_color_train [n] [m]
             in if j >= end || T < 0.0001 then ((r,g,b), T) else
 
             -- otherwise, keep calculating colors based on the intersecting gaussians
-            let mean_clip = gs[sorted_indices[j]].mean_clip
-            let mean = (ndc_to_pix mean_clip.0 (i32.i64 W), ndc_to_pix mean_clip.1 (i32.i64 H))
+            let mean = gs[sorted_indices[j]].mean
             let opacity = gs[sorted_indices[j]].opacity
             let g_color = gs[sorted_indices[j]].color
             let conic = gs[sorted_indices[j]].conic
@@ -303,7 +295,6 @@ def pixel_color_train [n] [m]
 -- Calculate the color of each pixel using as many iterations as necessary per pixel
 def pixel_color_test [n] [m]
     (W: i64)
-    (H: i64)
     (sorted_keys: [m]u64) 
     (sorted_indices: [m]i32)
     (bg: [3]f32)
@@ -323,8 +314,8 @@ def pixel_color_test [n] [m]
 
         -- This whole for-loop is just equation 2 from the 3dgs paper (Kerbl et al. 2023)
         let ((pr, pg, pb), bg_T, _) = loop ((r,g,b), T, i) = ((0.0f32, 0.0, 0.0), 1.0, start) while T > 0.0001 && i < end do
-            let mean_clip =  gs[sorted_indices[i]].mean_clip
-            let mean = (ndc_to_pix mean_clip.0 (i32.i64 W), ndc_to_pix mean_clip.1 (i32.i64 H))
+            let mean =  gs[sorted_indices[i]].mean
+           -- let mean = (ndc_to_pix mean_clip.0 (i32.i64 W), ndc_to_pix mean_clip.1 (i32.i64 H))
             let opacity = gs[sorted_indices[i]].opacity
             let g_color = gs[sorted_indices[i]].color
             let conic = gs[sorted_indices[i]].conic
@@ -396,8 +387,8 @@ def rasterize2dGaussians [n]
         let (sorted_gaussian_keys, sorted_gaussian_indices) = unzip sorted_list
 
         -- define a function to find the color of a pixel
-        let f_test = pixel_color_test image_width image_height sorted_gaussian_keys sorted_gaussian_indices background g2ds_culled
-        let f_train = pixel_color_train image_width image_height sorted_gaussian_keys sorted_gaussian_indices background g2ds_culled
+        let f_test = pixel_color_test image_width sorted_gaussian_keys sorted_gaussian_indices background g2ds_culled
+        let f_train = pixel_color_train image_width sorted_gaussian_keys sorted_gaussian_indices background g2ds_culled
 
 
 
@@ -418,20 +409,18 @@ def compute2dGaussians [n]
     (scales: [n][3]f32)
     (rotations: [n][4]f32)
     (view_matrix: [4][4]f32)
-    (proj_matrix: [4][4]f32)
     (tan_fovx: f32)
     (tan_fovy: f32)
     (H: i32)
     (W: i32): [n]Gaussian2D = 
         let focalx = (f32.i32 W) / (2*tan_fovx)
         let focaly = (f32.i32 H) / (2*tan_fovy)
-        let proj_matrix' = transpose proj_matrix
         let view_matrix' = transpose view_matrix
 
        -- preprocess each gaussian in parallel. This generates our list of Gaussian2D records.
         in map5
             (\mean scale rotation opacity color -> 
-                preprocess mean scale rotation view_matrix' proj_matrix' W H focalx focaly tan_fovx tan_fovy opacity[0] color)
+                preprocess mean scale rotation view_matrix'  W H focalx focaly tan_fovx tan_fovy opacity[0] color)
             means3D scales rotations opacities colors
 
 
@@ -448,7 +437,7 @@ entry rasterize [n]
    -- (scale_modifier: f32) -- unused
     --(cov3D_precomp: [][3][3]f32) -- unused
     (view_matrix: [4][4]f32)
-    (proj_matrix: [4][4]f32)
+   -- (proj_matrix: [4][4]f32)  -- unused
     (tan_fovx: f32)
     (tan_fovy: f32)
     (image_height: i64)
@@ -461,28 +450,8 @@ entry rasterize [n]
     : ([n]i32, [image_height][image_width][3]f32, i32) =
         let H = i32.i64 image_height
         let W = i32.i64 image_width
-        let gaussians = compute2dGaussians means3D colors opacities scales rotations view_matrix proj_matrix tan_fovx tan_fovy H W
+        let gaussians = compute2dGaussians means3D colors opacities scales rotations view_matrix tan_fovx tan_fovy H W
         in rasterize2dGaussians gaussians background image_height image_width false
-
--- rasterize n gaussians from m camera poses in a batch
-entry batch_rasterize [n] [m]
-    (background: [3]f32)    
-    (means3D: [n][3]f32)
-    (colors: [n][3]f32)
-    (opacities: [n][1]f32)
-    (scales: [n][3]f32)
-    (rotations: [n][4]f32)
-    (view_matrices: [m][4][4]f32)
-    (proj_matrices: [m][4][4]f32)
-    (tan_fovx: f32)
-    (tan_fovy: f32)
-    (image_height: i64)
-    (image_width: i64)
-    : ([m][image_height][image_width][3]f32) = 
-    let f = \view_matrix proj_matrix -> 
-        (rasterize background means3D colors opacities scales rotations view_matrix proj_matrix
-            tan_fovx tan_fovy image_height image_width).1
-    in map2 f view_matrices proj_matrices
 
 -- https://en.wikipedia.org/wiki/Structural_similarity_index_measure#Algorithm
 def ssim3 [n] [m] [o]
@@ -565,7 +534,6 @@ entry grad [n]
     (scales: [n][3]f32)
     (rotations: [n][4]f32)
     (view_matrix: [4][4]f32)
-    (proj_matrix: [4][4]f32)
     (tan_fovx: f32)
     (tan_fovy: f32)
     (image_height: i64)
@@ -577,19 +545,25 @@ entry grad [n]
        : ([n][3]f32, [n][3]f32, [n][3]f32, [n][1]f32, [n][3]f32, [n][4]f32, [image_height][image_width][3]f32, [n]i32, f32, i32) = 
         let H = i32.i64 image_height
         let W = i32.i64 image_width
+        
+        let focalx = (f32.i32 W) / (2*tan_fovx)
+        let focaly = (f32.i32 H) / (2*tan_fovy)
 
         -- calculate the 2D means of the gaussians and dm_2D/dm_3D
-        let project_means_to_clip = map (\mean -> 
-                let p_hom = transform_point_4x4 mean (transpose proj_matrix)
-                let p_w = 1 / (p_hom[3] + 1e-7) -- avoid divide by 0
-                -- the gassian mean in clip space
-                in (p_hom[0]*p_w, p_hom[1]*p_w))
+        let project_means_3d_to_2d = map (\mean -> 
+                let cmean = transform_point_4x3 mean (transpose view_matrix)
 
+                in
+                    (
+                        (f32.i32 W/2) + focalx * cmean.0/cmean.2, -- pix x
+                        (f32.i32 H/2) + focaly * cmean.1/cmean.2  -- pix y
+                    )
+        )
 
         -- get the first row of the dm_2/dm_3 jacobian
-        let (means2D_clips, d2D_3D_1s) = vjp2 project_means_to_clip means3D (rep (1,0))
+        let (means2D, d2D_3D_1s) = vjp2 project_means_3d_to_2d means3D (rep (1,0))
         -- get the second row of the dm_2/dm_3 jacobian
-        let d2D_3D_2s = vjp project_means_to_clip means3D (rep (0,1))
+        let d2D_3D_2s = vjp project_means_3d_to_2d means3D (rep (0,1))
 
         -- compose jacobian of form
         -- [
@@ -604,7 +578,7 @@ entry grad [n]
 
         -- a function that takes 3d means and returns conics
         let to_conic = \(means3D, scales, rotations) -> (
-            let gaussians = compute2dGaussians means3D colors opacities scales rotations view_matrix proj_matrix tan_fovx tan_fovy H W 
+            let gaussians = compute2dGaussians means3D colors opacities scales rotations view_matrix tan_fovx tan_fovy H W 
             in map (\(g: Gaussian2D) -> g.conic) gaussians
         ) 
         
@@ -634,13 +608,13 @@ entry grad [n]
 
         -- define a forward pass to get the loss
         let forward =  
-            \(means2D_clips, conics, colors, opacities, scales, rotations) -> (
+            \(means2D, conics, colors, opacities, scales, rotations) -> (
                 -- calculate the gaussians
                 let gaussians = compute2dGaussians means3D colors opacities scales rotations view_matrix 
-                    proj_matrix tan_fovx tan_fovy H W
+                    tan_fovx tan_fovy H W
 
                 -- propagate the means2D_clip and conic paramaters we were given
-                let gaussians' = map3 (\(g: Gaussian2D) m c -> (g with mean_clip = m) with conic=c) gaussians means2D_clips conics
+                let gaussians' = map3 (\(g: Gaussian2D) m c -> (g with mean = m) with conic=c) gaussians means2D conics
 
                 -- rasterize the gaussians
                 let (radii, pix, maxg) = rasterize2dGaussians gaussians' background image_height image_width true
@@ -650,7 +624,7 @@ entry grad [n]
                 in (l, radii, pix, maxg))
 
         -- inputs to our forward pass
-        let inps = (means2D_clips, conic_2d, colors, opacities, scales, rotations)
+        let inps = (means2D, conic_2d, colors, opacities, scales, rotations)
 
         -- perform a full forward and backward pass on our loss calculation
         let ((loss', radii, pix, maxg), (dmeans2D, dconics, dcolors, dopacities, _, _)) = vjp2 forward inps (1.0, rep 0, rep (rep [0,0,0]), 0)
@@ -683,7 +657,6 @@ entry grad2 [n]
     (scales: [n][3]f32)
     (rotations: [n][4]f32)
     (view_matrix: [4][4]f32)
-    (proj_matrix: [4][4]f32)
     (tan_fovx: f32)
     (tan_fovy: f32)
     (image_height: i64)
@@ -701,7 +674,7 @@ entry grad2 [n]
             \(means3D, colors, opacities, scales, rotations) -> (
                 -- calculate the gaussians
                 let gaussians = compute2dGaussians means3D colors opacities scales rotations view_matrix 
-                    proj_matrix tan_fovx tan_fovy H W
+                    tan_fovx tan_fovy H W
 
                 -- rasterize the gaussians
                 let (radii, pix, _) = rasterize2dGaussians gaussians background image_height image_width true
@@ -732,7 +705,7 @@ entry grad2 [n]
             -- find where the gaussian is in camera space
             let mean_cam = transform_point_4x3 mean (transpose view_matrix)
             -- project the rotated dL/dm3d into screen space
-            in [2*dmean_cam[0]*mean_cam[2], 2*dmean_cam[1]*mean_cam[2], 0]
+            in [2*dmean_cam.0*mean_cam.2, 2*dmean_cam.1*mean_cam.2, 0]
         ) dmeans3D means3D
 
         in (dmeans3D, dmeans2D, dcolors, dopacities, dscales, drotations, pix, radii, loss')
@@ -749,7 +722,6 @@ entry grad3 [n]
     (scales: [n][3]f32)
     (rotations: [n][4]f32)
     (view_matrix: [4][4]f32)
-    (proj_matrix: [4][4]f32)
     (tan_fovx: f32)
     (tan_fovy: f32)
     (image_height: i64)
@@ -762,10 +734,13 @@ entry grad3 [n]
         let H = i32.i64 image_height
         let W = i32.i64 image_width
 
+        let focalx = (f32.i32 W) / (2*tan_fovx)
+        let focaly = (f32.i32 H) / (2*tan_fovy)
+
         -- define a forward pass to get the loss
         let forward =  
             \(means3D, colors, opacities, scales, rotations) -> (
-                let (radii, pix, _) = rasterize background means3D colors opacities scales rotations view_matrix proj_matrix tan_fovx tan_fovy image_height image_width              
+                let (radii, pix, _) = rasterize background means3D colors opacities scales rotations view_matrix tan_fovx tan_fovy image_height image_width              
                 let l = loss image_height image_width ssim_kernel_size ssim_kernel_sigma pix gt_image lambda
                 in (l, radii, pix))
 
@@ -774,22 +749,27 @@ entry grad3 [n]
             \means2D -> (
                 -- calculate the gaussians
                 let gaussians = compute2dGaussians means3D colors opacities scales rotations view_matrix 
-                    proj_matrix tan_fovx tan_fovy H W
+                    tan_fovx tan_fovy H W
 
                 -- propagate the means2D_clip and conic paramaters we were given
-                let gaussians' = map2 (\(g: Gaussian2D) m -> g with mean_clip = m) gaussians means2D
+                let gaussians' = map2 (\(g: Gaussian2D) m -> g with mean = m) gaussians means2D
 
                 -- rasterize the gaussians
                 let (_, pix, _) = rasterize2dGaussians gaussians' background image_height image_width true
 
                 -- calculate the loss and return
                 in loss image_height image_width ssim_kernel_size ssim_kernel_sigma pix gt_image lambda)
-            
+    
+        
         let means2D = map (\mean -> 
-                let p_hom = transform_point_4x4 mean (transpose proj_matrix)
-                let p_w = 1 / (p_hom[3] + 1e-7) -- avoid divide by 0
-                -- the gassian mean in clip space
-                in (p_hom[0]*p_w, p_hom[1]*p_w)) means3D
+                let cmean = transform_point_4x3 mean (transpose view_matrix)
+
+                in
+                    (
+                        (f32.i32 W/2) + focalx * cmean.0/cmean.2, -- pix x
+                        (f32.i32 H/2) + focaly * cmean.1/cmean.2  -- pix y
+                    )
+        ) means3D
 
         -- inputs to our forward pass
         let inps = (means3D, colors, opacities, scales, rotations)
