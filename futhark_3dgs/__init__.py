@@ -27,11 +27,14 @@ def to_torch(v):
 
 
 class Futhark_Rasterization_Server(Server):
-    def __init__(self):
+    def __init__(self, opts=None):
         base_dir = os.path.dirname(os.path.abspath(__file__))
         rasterizer_path = os.path.join(base_dir, '..', 'futhark_rasterizer', 'rasterizer')
         rasterizer_path = os.path.abspath(rasterizer_path)
-        super().__init__(rasterizer_path)
+        if opts: 
+            super().__init__(rasterizer_path, opts)
+        else:
+            super().__init__(rasterizer_path)
 
 def rasterize_gaussians(
     means3D,
@@ -83,7 +86,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             'scales':       to_numpy(scales),
             'rotations':    to_numpy(rotations),
             'viewmatrix':   to_numpy(raster_settings.viewmatrix),
-            'projmatrix':   to_numpy(raster_settings.projmatrix),
+        #    'projmatrix':   to_numpy(raster_settings.projmatrix),
             'tanfovx':      np.float32(raster_settings.tanfovx),
             'tanfovy':      np.float32(raster_settings.tanfovy),
             'image_height': np.int64(raster_settings.image_height),
@@ -103,15 +106,15 @@ class _RasterizeGaussians(torch.autograd.Function):
 
         # call our all-inclusive grad function
         if raster_settings.gt_image != None:
-            server.cmd_call("grad", "grad_out", *inputs.keys())
-            dmeans3d, dmeans2d, dcolors, dopacities, dscales, drotations, color, radii, l, maxg = server.get_value('grad_out')
+            server.cmd_call("grad", "out", *inputs.keys())
+            dmeans3d, dmeans2d, dcolors, dopacities, dscales, drotations, color, radii, l = server.get_value('out')
         else:
-            server.cmd_call("rasterize", "grad_out", *inputs.keys())
-            radii, color = server.get_value("grad_out")
+            server.cmd_call("rasterize", "out", *inputs.keys())
+            radii, color = server.get_value("out")
         
         # free variables from the server (we will replace them with new values next time we call the rasterizer)
         server.cmd_free(*inputs.keys())
-        server.cmd_free("grad_out")
+        server.cmd_free("out")
         server.cmd_clear() # we need this line here, otherwise we get a memory leak and eventually an OOM
         
         # they store the color in a weird way. we mimic

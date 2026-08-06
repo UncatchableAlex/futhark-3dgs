@@ -86,7 +86,7 @@ target = np.array([0,0,0.0], dtype=np.float32)
 view_matrix = np.array(look_at(cam_pos, target), dtype= np.float32).T
 
 # just test to make sure that our gaussian is on screen
-mean3d = [0,-0.1,0,1]
+mean3d = [0,0,0,1]
 cam = view_matrix.T @ np.array(mean3d)
 pix = 100 + (cam / cam[2])
 
@@ -98,12 +98,12 @@ gt = np.asarray(Image.open('/home/mjk711/gaussian-splatting/submodules/futhark-3
 
 
 inputs = {
-    'bg':           np.array([0,0,0],                       dtype=np.float32),
+    'bg':           np.array([1,1,1],                       dtype=np.float32),
     'means3d':      np.array([mean3d[:3]],                  dtype=np.float32),
-    'colors':       np.array([[0,1,0]],                     dtype=np.float32),
+    'colors':       np.array([[1,0,0]],                     dtype=np.float32),
     'opacities':    np.array([[1]],                         dtype=np.float32),
-    'scales':       np.array([[0.1,0.5,0.1]],               dtype=np.float32),
-    'rotations':    np.array([[0.0,0.0,0.1,0.8]],                   dtype=np.float32),
+    'scales':       np.array([[0.1,0.33,0.2]],               dtype=np.float32),
+    'rotations':    np.array([[0.92,0.0,0,0.38]],                   dtype=np.float32),
     'viewmatrix':   view_matrix,
   #  'projmatrix':   fused_proj,
     'tanfovx':      np.float32(np.tan(fovx*0.5)),
@@ -147,7 +147,7 @@ inputs = {
 
 with Futhark_Rasterization_Server() as server:
 
-    for f in ['grad', 'grad2', 'grad3']:
+    for f in ['grad', 'grad_naive']:
         print(f'##########################################  {f}  #############################################')
         t = PrettyTable()
         t.field_names = [

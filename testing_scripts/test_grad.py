@@ -84,7 +84,7 @@ with Futhark_Rasterization_Server() as server:
     server.cmd_free('out')    
 
     # run
-    server.cmd_call("grad2", 'out', *inputs.keys())
+    server.cmd_call("grad_naive", 'out', *inputs.keys())
     
     outs2 = {}
     for k,v in zip(output_vars, server.get_value('out')):
