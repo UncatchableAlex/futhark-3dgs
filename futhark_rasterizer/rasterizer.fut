@@ -15,7 +15,8 @@ import "util"
 import "lib/github.com/diku-dk/sorts/radix_sort"
 
 def TILESIZE = 16i32
-def MAX_GAUSSIANS_PER_PIX = 8192i32
+--def MAX_GAUSSIANS_PER_PIX = 8192i32
+def MAX_GAUSSIANS_PER_PIX = 2048i32
 
 type Gaussian2D =
   { opacity: f32
@@ -104,8 +105,8 @@ def preprocess -- (P: i32) -- n
                (viewmatrix: [4][4]f32)
                --(projmatrix: [4][4]f32)
                --(cam_pos: [3]f32)
-               (W: i32)
-               (H: i32)
+               (w: i32)
+               (h: i32)
                (focal_x: f32)
                (focal_y: f32)
                (tan_fovx: f32)
@@ -123,20 +124,20 @@ def preprocess -- (P: i32) -- n
 
 
   -- get the pixel of the gaussian's mean in screen space
-  let pix = (ndc_to_pix clip.0 W, ndc_to_pix clip.1 H)
+  let pix = (ndc_to_pix clip.0 w, ndc_to_pix clip.1 h)
 
   let depth: f32 = cmean.2
   -- keep depth info separate
 
   -- determine if this gaussian is in view
-  -- let margin_x = 0.15 * f32.i32 W
-  -- let margin_y = 0.15 * f32.i32 H
+  -- let margin_x = 0.15 * f32.i32 w
+  -- let margin_y = 0.15 * f32.i32 h
   let in_view =
     depth > 0.2
     -- && pix.0 > -margin_x
-    -- && pix.0 < f32.i32 W + margin_x
+    -- && pix.0 < f32.i32 w + margin_x
     -- && pix.1 > -margin_y
-    -- && pix.1 < f32.i32 H + margin_y
+    -- && pix.1 < f32.i32 h + margin_y
   let badG: Gaussian2D =
     { opacity = opacity
     , color = color
@@ -178,7 +179,7 @@ def preprocess -- (P: i32) -- n
                   let std3 = f32.ceil <| 3 * (f32.sqrt larger_principle_axis)
                   -- calculate a bounding box for the support of our gaussian in pixel space. Define the box with 3 std deviations from the mean
                   -- in the most stretched direction (either lambda1 or lambda2)
-                  let (ylo, yhi, xlo, xhi): (i32, i32, i32, i32) = get_rect_2d pix std3 W H TILESIZE
+                  let (ylo, yhi, xlo, xhi): (i32, i32, i32, i32) = get_rect_2d pix std3 w h TILESIZE
                   let num_tiles: i32 = (yhi - ylo) * (xhi - xlo)
                   in if num_tiles == 0
                      then badG
@@ -199,7 +200,7 @@ def preprocess -- (P: i32) -- n
 def generateElem [n]
                  (gs: [n]Gaussian2D)
                  (prefix_sum: [n]i32)
-                 (W: i32)
+                 (w: i32)
                  (idx: i64) : (u64, i32) =
   -- search to find which gaussian this index refers to
   let bs = binary_search prefix_sum (i32.i64 idx) u64.i32
@@ -215,7 +216,7 @@ def generateElem [n]
   let offset = (i32.i64 idx) - prefix_sum[n_idx]
   let tile_y = ylo + (offset / (xhi - xlo))
   let tile_x = xlo + (offset % (xhi - xlo))
-  let tile = tile_y * ((W + TILESIZE - 1) / TILESIZE) + tile_x
+  let tile = tile_y * ((w + TILESIZE - 1) / TILESIZE) + tile_x
   let upper = ((u64.i32 tile) u64.<< 32)
   let key = upper | (u64.u32 <| f32.to_bits <| f32.f32 depth)
   in (key, n_idx)
@@ -223,8 +224,8 @@ def generateElem [n]
 -- Calculate the color of each pixel using an upper limit on the
 -- number of gaussians per pixel
 def pixel_color_train [n] [m]
-                      (W: i64)
-                      (H: i64)
+                      (w: i64)
+                      (h: i64)
                       (sorted_keys: [m]u64)
                       (sorted_indices: [m]i32)
                       (bg: [3]f32)
@@ -235,7 +236,7 @@ def pixel_color_train [n] [m]
   let ts = i64.i32 TILESIZE
   let tile_y = pix_y / ts
   let tile_x = pix_x / ts
-  let tile = tile_y * ((W + ts - 1) / ts) + tile_x
+  let tile = tile_y * ((w + ts - 1) / ts) + tile_x
   -- the index of the first gaussian in the sorted list in the given tile
   let start = binary_search sorted_keys ((u64.i64 tile) << 32) id
   -- the index of the last gaussian in the sorted list in the given tile
@@ -254,7 +255,7 @@ def pixel_color_train [n] [m]
               let opacity = gs[sorted_indices[j]].opacity
               let g_color = gs[sorted_indices[j]].color
               let conic = gs[sorted_indices[j]].conic
-              let mean_pix = (ndc_to_pix mean_clip.0 (i32.i64 W), ndc_to_pix mean_clip.1 (i32.i64 H))
+              let mean_pix = (ndc_to_pix mean_clip.0 (i32.i64 w), ndc_to_pix mean_clip.1 (i32.i64 h))
               -- the distance of this pixel from the ith gaussian's mean
               let dx = f32.i64 pix_x - mean_pix.0
               let dy = f32.i64 pix_y - mean_pix.1
@@ -286,8 +287,8 @@ def pixel_color_train [n] [m]
 
 -- Calculate the color of each pixel using as many iterations as necessary per pixel
 def pixel_color_test [n] [m]
-                     (W: i64)
-                     (H: i64)
+                     (w: i64)
+                     (h: i64)
                      (sorted_keys: [m]u64)
                      (sorted_indices: [m]i32)
                      (bg: [3]f32)
@@ -299,7 +300,7 @@ def pixel_color_test [n] [m]
   let ts = i64.i32 TILESIZE
   let tile_y = pix_y / ts
   let tile_x = pix_x / ts
-  let tile = tile_y * ((W + ts - 1) / ts) + tile_x
+  let tile = tile_y * ((w + ts - 1) / ts) + tile_x
   -- the index of the first gaussian in the sorted list in the given tile
   let start = binary_search sorted_keys ((u64.i64 tile) << 32) id
   -- the index of the last gaussian in the sorted list in the given tile
@@ -309,11 +310,11 @@ def pixel_color_test [n] [m]
     loop ((r, g, b), T, i) = ((0.0f32, 0.0, 0.0), 1.0, start)
     while T > 0.0001 && i < end do
       let mean_clip = gs[sorted_indices[i]].mean_clip
-      -- let mean = (ndc_to_pix mean_clip.0 (i32.i64 W), ndc_to_pix mean_clip.1 (i32.i64 H))
+      -- let mean = (ndc_to_pix mean_clip.0 (i32.i64 w), ndc_to_pix mean_clip.1 (i32.i64 h))
       let opacity = gs[sorted_indices[i]].opacity
       let g_color = gs[sorted_indices[i]].color
       let conic = gs[sorted_indices[i]].conic
-      let mean_pix = (ndc_to_pix mean_clip.0 (i32.i64 W), ndc_to_pix mean_clip.1 (i32.i64 H))
+      let mean_pix = (ndc_to_pix mean_clip.0 (i32.i64 w), ndc_to_pix mean_clip.1 (i32.i64 h))
 
       -- the distance of this pixel from the ith gaussian's mean
       let dx = f32.i64 pix_x - mean_pix.0
@@ -349,8 +350,8 @@ def rasterize2dGaussians [n]
                          (image_height: i64)
                          (image_width: i64)
                          (train: bool) : ([n]i32, [image_height][image_width][3]f32) =
-  let H = i32.i64 image_height
-  let W = i32.i64 image_width
+  let h = i32.i64 image_height
+  let w = i32.i64 image_width
   let radii = map (\g -> g.radius) g2ds
   let g2ds_culled = filter (\g -> g.valid) g2ds
   let num_tiles = map (\g -> g.tiles_touching) g2ds_culled
@@ -365,7 +366,7 @@ def rasterize2dGaussians [n]
                               (\(k, _) -> k)                           -- block size for a100 gpu
                               64                                       -- extract the key
                               (\i k -> i32.u64 (k >> (u64.i32 i) & 1)) -- sort on 64 bit keys
-                              (map (generateElem g2ds_culled prefix_sum W) (iota <| i64.i32 tiles_touched)) -- get the ith bit
+                              (map (generateElem g2ds_culled prefix_sum w) (iota <| i64.i32 tiles_touched)) -- get the ith bit
   -- the kv pairs we are sorting where the key is (tile, depth) as a u64
 
   -- the sorted gaussian keys are the keys of each copy of each gaussian in the big list.
@@ -378,8 +379,8 @@ def rasterize2dGaussians [n]
   -- tabulate on each pixel using our function
   let pixels =
     if train
-    then tabulate_2d (i64.i32 H) (i64.i32 W) (\y x -> f_train x y) :> [image_height][image_width][3]f32
-    else tabulate_2d (i64.i32 H) (i64.i32 W) (\y x -> f_test x y) :> [image_height][image_width][3]f32
+    then tabulate_2d (i64.i32 h) (i64.i32 w) (\y x -> f_train x y) :> [image_height][image_width][3]f32
+    else tabulate_2d (i64.i32 h) (i64.i32 w) (\y x -> f_test x y) :> [image_height][image_width][3]f32
   in (radii, pixels)
 
 def compute2dGaussians [n]
@@ -391,14 +392,14 @@ def compute2dGaussians [n]
                        (view_matrix: [4][4]f32)
                        (tan_fovx: f32)
                        (tan_fovy: f32)
-                       (H: i32)
-                       (W: i32) : [n]Gaussian2D =
-  let focalx = (f32.i32 W) / (2 * tan_fovx)
-  let focaly = (f32.i32 H) / (2 * tan_fovy)
+                       (h: i32)
+                       (w: i32) : [n]Gaussian2D =
+  let focalx = (f32.i32 w) / (2 * tan_fovx)
+  let focaly = (f32.i32 h) / (2 * tan_fovy)
   let view_matrix' = transpose view_matrix
   -- preprocess each gaussian in parallel. This generates our list of Gaussian2D records.
   in map5 (\mean scale rotation opacity color ->
-             preprocess mean scale rotation view_matrix' W H focalx focaly tan_fovx tan_fovy opacity[0] color)
+             preprocess mean scale rotation view_matrix' w h focalx focaly tan_fovx tan_fovy opacity[0] color)
           means3D
           scales
           rotations
@@ -429,8 +430,8 @@ entry rasterize [n]
               --(prefiltered: bool) -- unused
               --(debug: bool) --unused
 ([n]i32, [image_height][image_width][3]f32) =
-  let H = i32.i64 image_height
-  let W = i32.i64 image_width
+  let h = i32.i64 image_height
+  let w = i32.i64 image_width
   -- An array of 2D Gaussian records derived from the scene parameters
   let gaussians =
     compute2dGaussians means3D
@@ -441,8 +442,8 @@ entry rasterize [n]
                        view_matrix
                        tan_fovx
                        tan_fovy
-                       H
-                       W
+                       h
+                       w
   -- rasterize the 2D Gaussians into a pixel array
   in rasterize2dGaussians gaussians
                           background
@@ -540,8 +541,8 @@ entry grad [n]
            (gt_image: [image_height][image_width][3]f32)
            (lambda: f32) : -- percentage of our loss that is dssim (the rest is L1)
 ([n][3]f32, [n][3]f32, [n][3]f32, [n][1]f32, [n][3]f32, [n][4]f32, [image_height][image_width][3]f32, [n]i32, f32) =
-  let H = i32.i64 image_height
-  let W = i32.i64 image_width
+  let h = i32.i64 image_height
+  let w = i32.i64 image_width
   -- calculate the 2D means of the gaussians and dm_2D/dm_3D
   let project_means_3d_to_2d =
     map (\mean ->
@@ -566,7 +567,7 @@ entry grad [n]
   -- a function that takes 3d means and returns conics
   let to_conic =
     \(means3D, scales, rotations) ->
-      (let gaussians = compute2dGaussians means3D colors opacities scales rotations view_matrix tan_fovx tan_fovy H W
+      (let gaussians = compute2dGaussians means3D colors opacities scales rotations view_matrix tan_fovx tan_fovy h w
        in map (\(g: Gaussian2D) -> g.conic) gaussians)
   -- get the dconic/dm_3 jacobian
   let (conic_2d, dconic_mean3D_1s) = jvp2 to_conic (means3D, scales, rotations) (rep [1, 0, 0], rep [0, 0, 0], rep [0, 0, 0, 0])
@@ -611,8 +612,8 @@ entry grad [n]
                             view_matrix
                             tan_fovx
                             tan_fovy
-                            H
-                            W
+                            h
+                            w
        -- replace the screen space means and conic values we just calculate with 
        -- the ones we were given to ensure correct propagation of gradients with vjp       
        let gaussians' = map3 (\(g: Gaussian2D) m c -> (g with mean_clip = m) with conic = c) gaussians means_clip conics
@@ -625,7 +626,7 @@ entry grad [n]
   let inps = (means2D, conic_2d, colors, opacities, scales, rotations)
   -- perform a full forward and backward pass on our loss calculation
   let ((loss', radii, pix), (dL_means2D, dL_conics, dL_colors, dL_opacities, _, _)) = vjp2 forward inps (1.0, rep 0, rep (rep [0, 0, 0]))
-  -- use the chain rule to calculate dL/dm_3 = (dL/dm_2 x dm2/dm3) + (dL/dC x dC/dm3)
+  -- use the chain rule to calculate dL/dm_3 = (dL/dm_2 x dm2/dm3) + (dL/dConic x dConic/dm3)
   let dL_means3D =
     map (\(i: i64) ->
            [ dmeans2D_means3D[i][0][0] * dL_means2D[i].0 + dmeans2D_means3D[i][1][0] * dL_means2D[i].1 + dconic_mean3D[i][0].0 * dL_conics[i].0 + dconic_mean3D[i][0].1 * dL_conics[i].1 + dconic_mean3D[i][0].2 * dL_conics[i].2
@@ -635,11 +636,9 @@ entry grad [n]
         (iota n)
   -- listify dL_means2D for backward compatibility
   let dL_means2D' = map (\m -> [m.0, m.1, 0]) dL_means2D
-  -- calculate dL/dS = dL/dC x dC/dS
+  -- calculate dL/dS = dL/dConic x dConic/ds
   let dscales = map2 transform_tup_3x3 dL_conics dconics_scales
-  -- map2 matmul_3x3
-
-  -- calculate dL/dS = dL/dC x dC/dR
+  -- calculate dL/dS = dL/dConic x dConic/dq
   let drotations = map2 transform_tup_4x3 dL_conics dconics_rotations
   in (dL_means3D, dL_means2D', dL_colors, dL_opacities, dscales, drotations, pix, radii, loss')
 
@@ -703,8 +702,8 @@ entry grad_naive [n]
   let inps = (means3D, colors, opacities, scales, rotations)
   -- perform a full forward and backward pass on our loss calculation
   let ((loss', radii, pix), (dL_means3D, dL_colors, dL_opacities, dscales, drotations)) = vjp2 forward_naive inps (1.0, rep 0, rep (rep [0, 0, 0]))
-  let H = i32.i64 image_height
-  let W = i32.i64 image_width
+  let h = i32.i64 image_height
+  let w = i32.i64 image_width
   -- define the same forward pass, but
   let forward_naive2 =
     \means2D ->
@@ -718,8 +717,8 @@ entry grad_naive [n]
                             view_matrix
                             tan_fovx
                             tan_fovy
-                            H
-                            W
+                            h
+                            w
       
        -- propagate the means2D_clip and conic paramaters we were given
        let gaussians' = map2 (\(g: Gaussian2D) m -> g with mean_clip = m) gaussians means2D

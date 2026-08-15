@@ -19,3 +19,5 @@ test_outputs
 outputs
 test.slurm
 test.fut
+*.json
+*.prof

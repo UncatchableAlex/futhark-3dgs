@@ -31,8 +31,11 @@ class Futhark_Rasterization_Server(Server):
         base_dir = os.path.dirname(os.path.abspath(__file__))
         rasterizer_path = os.path.join(base_dir, '..', 'futhark_rasterizer', 'rasterizer')
         rasterizer_path = os.path.abspath(rasterizer_path)
+        self.dir = base_dir
+        self.profiling = False
         if opts: 
             super().__init__(rasterizer_path, opts)
+            self.profiling = '-P' in opts
         else:
             super().__init__(rasterizer_path)
 
@@ -106,7 +109,14 @@ class _RasterizeGaussians(torch.autograd.Function):
 
         # call our all-inclusive grad function
         if raster_settings.gt_image != None:
+            if server.profiling:
+                server.cmd_unpause_profiling()
+
             server.cmd_call("grad", "out", *inputs.keys())
+
+            if server.profiling:
+                server.cmd_pause_profiling()
+                
             dmeans3d, dmeans2d, dcolors, dopacities, dscales, drotations, color, radii, l = server.get_value('out')
         else:
             server.cmd_call("rasterize", "out", *inputs.keys())
