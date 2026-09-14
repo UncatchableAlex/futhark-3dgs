@@ -21,3 +21,4 @@ test.slurm
 test.fut
 *.json
 *.prof
+*.txt

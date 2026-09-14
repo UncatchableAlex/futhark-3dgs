@@ -11,6 +11,10 @@ import torch
 from futhark_server import Server
 import os
 
+SSIM_STATS = {
+    'kernel_size' : 11,
+    'kernel_sigma': 1.5
+}
 
 def cpu_deep_copy_tuple(input_tuple):
     copied_tensors = [item.cpu().clone() if isinstance(item, torch.Tensor) else item for item in input_tuple]
@@ -76,10 +80,10 @@ class _RasterizeGaussians(torch.autograd.Function):
         cov3Ds_precomp,
         raster_settings
     ):
-        # pass our params to the futhark server through stdin. It's a major
+        # pass our params to the futhark server through stdin. It's a slight
         # bummer that we have to detach our tensors from the gpu to feed them to 
         # the server via stdin where they just get written to the gpu again. We basically
-        # go gpu -> cpu -> gpu. Kinda sus..
+        # go gpu -> cpu -> gpu. 
         server = raster_settings.futhark_server
         inputs = {
             'bg':           to_numpy(raster_settings.bg),
@@ -93,12 +97,16 @@ class _RasterizeGaussians(torch.autograd.Function):
             'tanfovx':      np.float32(raster_settings.tanfovx),
             'tanfovy':      np.float32(raster_settings.tanfovy),
             'image_height': np.int64(raster_settings.image_height),
-            'image_width':  np.int64(raster_settings.image_width)
+            'image_width':  np.int64(raster_settings.image_width),
+            'limit_gaussians_per_pix': np.int32(int(raster_settings.limit_gaussians_per_pix))
         }
+        # if we were given a ground truth image, that means that we should call the grad function.
+        # therefore, we need to add the grad parameters to our inputs
         if raster_settings.gt_image != None:
+            inputs.pop('limit_gaussians_per_pix')
             inputs.update({
-                'ssim_kernel_size': np.int32(11),
-                'ssim_kernel_sigma': np.float32(1.5),
+                'ssim_kernel_size': np.int32(SSIM_STATS['kernel_size']),
+                'ssim_kernel_sigma': np.float32(SSIM_STATS['kernel_sigma']),
                 'gt_image':     to_numpy(raster_settings.gt_image).transpose(1,2,0),
                 'lambda' :      np.float32(0.2)
             })
@@ -118,6 +126,7 @@ class _RasterizeGaussians(torch.autograd.Function):
                 server.cmd_pause_profiling()
                 
             dmeans3d, dmeans2d, dcolors, dopacities, dscales, drotations, color, radii, l = server.get_value('out')
+        # if we weren't given a ground truth image, then call the rasterize function (which doesn't do any AD)
         else:
             server.cmd_call("rasterize", "out", *inputs.keys())
             radii, color = server.get_value("out")
@@ -190,6 +199,7 @@ class GaussianRasterizationSettingsFuthark(NamedTuple):
     antialiasing : bool
     futhark_server : Server
     gt_image: torch.Tensor
+    limit_gaussians_per_pix: bool
 
 class GaussianRasterizerFuthark(nn.Module):
     def __init__(self, raster_settings):

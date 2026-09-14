@@ -295,7 +295,6 @@ def pixel_color_test [n] [m]
                      (gs: [n]Gaussian2D)
                      (pix_x: i64)
                      (pix_y: i64) : [3]f32 =
-  --(f32, f32, f32)  = -- output: rgb
   -- our pixel's tile
   let ts = i64.i32 TILESIZE
   let tile_y = pix_y / ts
@@ -423,7 +422,11 @@ entry rasterize [n]
                 (tan_fovx: f32) -- encodes focal (x) length
                 (tan_fovy: f32) -- encodes focal (y) length
                 (image_height: i64)  -- in pixels
-                (image_width: i64) : -- in pixels
+                (image_width: i64)  -- in pixels
+                (use_pctrain: i32) : -- whether or not to use pixel_color_train. 
+                                      -- This limits the number of gaussians evaluated per pixel and generates artifacts
+                                      -- used only for apples-to-apples comparison testing. We use an integer, because the server interface
+                                      -- doesn't play nice with python booleans
               --(sh: [][3][]f32) -- unused
               --(degree: i32) -- unused
               --(campos: [3]f32) -- unused
@@ -449,7 +452,7 @@ entry rasterize [n]
                           background
                           image_height
                           image_width
-                          false
+                          (use_pctrain != 0)
 
 -- https://en.wikipedia.org/wiki/Structural_similarity_index_measure#Algorithm
 def ssim3 [n] [m] [o]
@@ -687,6 +690,7 @@ entry grad_naive [n]
                    tan_fovy
                    image_height
                    image_width
+                   1
        -- compute the loss
        let l =
          loss image_height
