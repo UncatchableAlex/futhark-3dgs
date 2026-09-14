@@ -376,10 +376,38 @@ def rasterize2dGaussians [n]
   let f_test = pixel_color_test image_width image_height sorted_gaussian_keys sorted_gaussian_indices background g2ds_culled
   let f_train = pixel_color_train image_width image_height sorted_gaussian_keys sorted_gaussian_indices background g2ds_culled
   -- tabulate on each pixel using our function
+  let ts = i64.i32 TILESIZE
+  let tiles_x = (i64.i32 w + ts - 1) / ts
+  let tiles_y = (i64.i32 h + ts - 1) / ts
+  let pixels_per_tile = ts * ts
+  let total = tiles_x * tiles_y * pixels_per_tile
+
+  let idx_to_pix (i: i64) : (i64, i64) =
+    let tile = i / pixels_per_tile
+    let loc = i % pixels_per_tile
+    let pix_y = (tile / tiles_x) * ts + loc / ts
+    let pix_x = (tile % tiles_x) * ts + loc % ts
+    in (pix_x, pix_y)
+
+  let compute f (i: i64) : (i64, [3]f32) =
+    let (pix_x, pix_y) = idx_to_pix i
+    in if pix_x < i64.i32 w && pix_y < i64.i32 h
+       then (pix_y * i64.i32 w + pix_x, f pix_x pix_y)
+       else (-1, [0f32, 0f32, 0f32])
+
+  let scatter_pixels f =
+    let (idxs, vals) = unzip (map (compute f) (iota total))
+    let scattered = scatter (replicate (image_height * image_width) [0f32, 0f32, 0f32]) idxs vals
+    in unflatten scattered :> [image_height][image_width][3]f32
+
   let pixels =
     if train
-    then tabulate_2d (i64.i32 h) (i64.i32 w) (\y x -> f_train x y) :> [image_height][image_width][3]f32
-    else tabulate_2d (i64.i32 h) (i64.i32 w) (\y x -> f_test x y) :> [image_height][image_width][3]f32
+    then scatter_pixels f_train
+    else scatter_pixels f_test
+  -- let pixels =
+  --   if train
+  --   then tabulate_2d (i64.i32 h) (i64.i32 w) (\y x -> f_train x y) :> [image_height][image_width][3]f32
+  --   else tabulate_2d (i64.i32 h) (i64.i32 w) (\y x -> f_test x y) :> [image_height][image_width][3]f32
   in (radii, pixels)
 
 def compute2dGaussians [n]
